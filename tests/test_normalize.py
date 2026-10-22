@@ -32,6 +32,9 @@ class TestContractExamples:
             ("a﻿b", "a b"),  # but the BOM is
             ("a\u001cb", "a\u001cb"),  # str.isspace() says yes; JavaScript's \s says no
             ("  ZANZIBÁR   quokka ", "zanzibar quokka"),
+            # Step 1 matters: NFKD first would split ㎏ before Σ is lowercased, so Σ would not be word-final.
+            ("ΑΣ㎏", "αςkg"),
+            ("ΑΣ™", "αςtm"),
             ("", ""),
         ],
     )

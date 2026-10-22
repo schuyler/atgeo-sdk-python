@@ -6,7 +6,7 @@ import pytest
 
 from atgeo._locations import Located, distance_to, in_region, locate
 from atgeo._region import haversine
-from atgeo.types import Bbox
+from atgeo.types import Bbox, Circle
 
 from .helpers import bbox_location, place, point
 
@@ -91,6 +91,15 @@ class TestDistanceToOutOfRangeCoordinates:
     def test_is_nan_where_javascript_gives_nan_rather_than_raising(self) -> None:
         # haversine's `a` goes negative here: math.sqrt would raise, Math.sqrt gives NaN.
         assert math.isnan(distance_to(point_at(95, 180), 85, 0) or 0.0)
+
+
+class TestDistanceToOutOfRangeBox:
+    def test_is_nan_when_any_candidate_is_as_math_min_gives(self) -> None:
+        # Only the north corner (latitude 215) is NaN; min() would skip it, Math.min does not.
+        loc = locate({"locations": [{"$type": "community.lexicon.location.bbox", "south": "7", "north": "215",
+                                     "west": "-24", "east": "-24"}]})  # fmt: skip
+        assert math.isnan(distance_to(loc, -35, 156) or 0.0)
+        assert in_region(loc, Circle(-35, 156, 2e7)) is False
 
 
 class TestDistanceToNoLocation:

@@ -7,12 +7,13 @@ import pytest
 
 from atgeo import Circle, Region
 from atgeo._rank import rank, round3
+from atgeo._text import jaro_winkler, text_score
 from atgeo._wire import TileRecord
 from atgeo.types import Bbox, SortMode
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, overture
-from .helpers import fixture, place, place_origin, point, record
+from .helpers import bbox_location, fixture, place, place_origin, point, record
 
 SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
 
@@ -22,13 +23,60 @@ REGION = Bbox(-1, -1, 1, 1)
 class TestRound3:
     @pytest.mark.parametrize(
         ("x", "expected"),
-        [(0.0025, 0.003), (0.0015, 0.002), (0.9048, 0.905), (0.49999999999999994, 0.5), (1.0, 1.0), (0.0, 0.0)],
+        [
+            (0.0625, 0.063),  # exactly representable: round(x, 3) gives 0.062, Math.round half up 0.063
+            (0.0025, 0.003),
+            (0.0015, 0.002),
+            (0.9048, 0.905),
+            (0.49999999999999994, 0.5),
+            (1.0, 1.0),
+            (0.0, 0.0),
+        ],
     )
     def test_rounds_half_up_like_math_round(self, x: float, expected: float) -> None:
         assert round3(x) == expected
 
 
+class TestScoring:
+    def test_keeps_a_score_of_exactly_the_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        records = [TileRecord(place(i, i, [point(0, 0)])) for i in ("keep", "drop")]
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.6 if v["name"] == "keep" else 0.5999999)
+        assert [h.name for h in rank(records, REGION, "q", SortMode.FUSED)] == ["keep"]
+
+    def test_scores_only_the_first_twelve_query_words_one_at_a_time(self) -> None:
+        words = [f"w{i}" for i in range(12)]
+        name = " ".join(words)
+        query = f"{name} zzzzzz"  # a thirteenth word that matches nothing
+        expected = 0.5 * jaro_winkler(query, name) + 0.5 * 1.0  # every one of the twelve matches exactly
+        assert text_score(query, {"name": name}) == expected
+
+    def test_ties_scores_that_differ_past_the_third_decimal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        records = [
+            TileRecord(place("a", "a", [point(0, 0)]), importance=1),
+            TileRecord(place("b", "b", [point(0, 0)]), importance=9),
+        ]
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.9001 if v["name"] == "a" else 0.9004)
+        assert [h.name for h in rank(records, REGION, "q", SortMode.FUSED)] == ["b", "a"]
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.9014 if v["name"] == "a" else 0.9004)
+        assert [h.name for h in rank(records, REGION, "q", SortMode.FUSED)] == ["a", "b"]
+
+
 class TestSortKeys:
+    def test_orders_distance_sort_by_importance_before_score(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        records = [
+            TileRecord(place("a", "a", [point(0, 0)]), importance=1),
+            TileRecord(place("b", "b", [point(0, 0)]), importance=9),
+        ]
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.9 if v["name"] == "a" else 0.7)
+        assert [h.name for h in rank(records, REGION, "q", SortMode.DISTANCE)] == ["b", "a"]
+
+    def test_gives_a_place_with_a_point_no_size_even_when_it_has_a_box_too(self) -> None:
+        # Both contain the centre (distance 0); the point-and-huge-box place is a point, so it is smaller.
+        both = place("both", "Both", [bbox_location(80, -80, 170, -170), point(0, 0)])
+        small = place("small", "Small", [bbox_location(0.1, -0.1, 0.1, -0.1)])
+        names = [h.name for h in rank([TileRecord(small), TileRecord(both)], REGION, "", SortMode.DISTANCE)]
+        assert names == ["Both", "Small"]
+
     def test_puts_a_null_origin_after_every_string(self) -> None:
         anon = place("x", "Same", [point(0, 0)], {"origin": None})
         records = [

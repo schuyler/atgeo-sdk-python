@@ -68,6 +68,12 @@ def check_server(server: str) -> str:
     return server.rstrip("/")
 
 
+def _scalar_values(s: str) -> str:
+    """Lone surrogates as U+FFFD, as URLSearchParams sends them; urlencode would raise. A pair of surrogate
+    code points becomes the character it encodes, as in JavaScript's UTF-16 strings."""
+    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 class Engine:
     def __init__(self, server: str, cache_budget_bytes: int, clock: Callable[[], float]) -> None:
         self._base = check_server(server)
@@ -81,7 +87,8 @@ class Engine:
 
     def xrpc_url(self, nsid: str, params: Sequence[tuple[str, str]]) -> str:
         # Form encoding as URLSearchParams does it (a literal + as %2B); the trailing ? stays with no parameters.
-        return prepare_url(f"{self._base}/xrpc/{nsid}?{urllib.parse.urlencode(params)}")
+        query = urllib.parse.urlencode([(k, _scalar_values(v)) for k, v in params])
+        return prepare_url(f"{self._base}/xrpc/{nsid}?{query}")
 
     @staticmethod
     def body_of(response: HttpResponse) -> object:

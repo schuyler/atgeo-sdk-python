@@ -9,7 +9,15 @@ from typing import Any, ClassVar
 import pytest
 
 from atgeo import AtgeoError, Bbox, Circle, PlaceRecord, Region, SortMode
-from atgeo.types import CollectionRef, ServedTileset, ServiceDescription
+from atgeo.types import (
+    CategoryCount,
+    CollectionAttribution,
+    CollectionInfo,
+    CollectionRef,
+    ServedTileset,
+    ServiceDescription,
+    Tileset,
+)
 
 from .conftest import Make
 from .fake_server import DEFAULT_SERVER, FakeServer, FakeTile, FakeTileset, overture
@@ -139,18 +147,23 @@ class TestDescribeServiceAndDescribeTileset:
         assert [t.slug for t in service.tilesets] == ["overture-place", "osm"]
 
     def test_describe_tileset_returns_the_descriptor(self, make: Make) -> None:
-        tileset = make(self.fake()).describe_tileset("osm")
-        assert tileset.slug == "osm"
-        (info,) = tileset.collections
-        assert (info.dataset, info.collection, info.record_count) == ("openstreetmap.org", "way", 3)
-        assert info.categories is not None
-        assert [(c.value, c.count) for c in info.categories] == [("cafe", 2)]
-        assert tileset.references is not None
-        (ref,) = tileset.references
-        assert (ref.dataset, ref.collection, ref.licenses) == (
-            "openstreetmap.org",
-            "node",
-            ("https://opendatacommons.org/licenses/odbl/",),
+        assert make(self.fake()).describe_tileset("osm") == Tileset(
+            slug="osm",
+            collections=(
+                CollectionInfo(
+                    dataset="openstreetmap.org",
+                    collection="way",
+                    record_count=3,
+                    categories=(CategoryCount(value="cafe", count=2),),
+                ),
+            ),
+            references=(
+                CollectionAttribution(
+                    dataset="openstreetmap.org",
+                    collection="node",
+                    licenses=("https://opendatacommons.org/licenses/odbl/",),
+                ),
+            ),
         )
 
     def test_describe_tileset_asks_the_server_each_time(self, make: Make) -> None:
@@ -238,7 +251,7 @@ class TestOrderingAmongPlacesContainingTheCenter:
         assert order == ["small", "large"]
 
     @pytest.mark.parametrize("sort", [SortMode.FUSED, SortMode.SIMILARITY])
-    def test_leaves_ties_to_the_origin_whatever_the_sizes(self, make: Make, sort: SortMode) -> None:
+    def test_leaves_ties_to_the_origin_under_sort_whatever_the_sizes(self, make: Make, sort: SortMode) -> None:
         large = place("a-large", "Same", [bbox_location(50, 40, 15, 5)])
         small = place("b-small", "Same", [bbox_location(46, 44, 11, 9)])
         order = self.ids(make, [(small, 5), (large, 5)], Circle(45, 10, 1000), text="Same", sort=sort)
@@ -357,3 +370,91 @@ class TestConstruction:
         client = make(FakeServer())
         with pytest.raises(TypeError):
             client.inner.search_places(REGION, "Starbux")  # type: ignore[call-arg]
+
+
+SMALL_STACK = """
+import asyncio, sys, threading
+from atgeo import AsyncAtgeoClient, AtgeoClient, AtgeoDecodingError, HttpResponse
+
+body = b"[" * 8000 + b"]" * 8000
+
+class Sync:
+    def get(self, url):
+        return HttpResponse(int(sys.argv[2]), body)
+
+class Async:
+    async def get(self, url):
+        return HttpResponse(int(sys.argv[2]), body)
+
+def run():
+    calls = {
+        "get_place": lambda c: c.get_place("urn:x:y:z:1"),
+        "describe_service": lambda c: c.describe_service(),
+        "describe_tileset": lambda c: c.describe_tileset("s"),
+    }
+    for name, call in calls.items():
+        try:
+            if sys.argv[1] == "sync":
+                call(AtgeoClient(transport=Sync()))
+            else:
+                asyncio.run(call(AsyncAtgeoClient(transport=Async())))
+        except Exception as e:
+            print(name, type(e).__name__)
+
+threading.stack_size(1 << 20)  # the official Alpine images' default
+t = threading.Thread(target=run)
+t.start()
+t.join()
+"""
+
+
+class TestResponsesParsedOffTheCallersThread:
+    """A deeply nested body can crash CPython 3.12 and 3.13 on a small stack, so the clients parse every body
+    on threads of their own, with 8 MiB stacks; here the app's thread has 1 MiB. Run in a child process, so
+    that a regression crashes the child, not the test session."""
+
+    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize("kind", ["sync", "async"])
+    def test_raises_for_deep_json_instead_of_crashing(self, kind: str, status: int) -> None:
+        import subprocess  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+
+        out = subprocess.run(
+            [sys.executable, "-c", SMALL_STACK, kind, str(status)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        error = "AtgeoDecodingError" if status == 200 else "AtgeoError"
+        assert out.stdout.split() == [
+            w for name in ("get_place", "describe_service", "describe_tileset") for w in (name, error)
+        ]
+
+
+class TestEventLoopAffinity:
+    def test_refuses_a_second_event_loop_before_any_request_with_the_default_transport(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from atgeo import AsyncAtgeoClient  # noqa: PLC0415
+
+        from .loopback import Loopback, Request, Writer  # noqa: PLC0415
+
+        def handle(_r: Request, w: Writer) -> None:
+            w.respond(404, b"", [("Connection", "close")])
+            w.close()
+
+        with Loopback(handler=handle) as server:
+            client = AsyncAtgeoClient(server.url(""))
+            with pytest.raises(AtgeoError):
+                asyncio.run(client.describe_tileset("s"))
+            for call in (
+                lambda: client.search_places(REGION),
+                lambda: client.get_place("urn:x"),
+                client.describe_service,
+            ):
+                with pytest.raises(RuntimeError, match="one client per event loop"):
+                    asyncio.run(call())
+            assert len(server.requests) == 1
+            asyncio.run(client.aclose())

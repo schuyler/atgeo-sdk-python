@@ -54,8 +54,18 @@ async def _in_thread(fn: Callable[[], _T]) -> _T:
 
 
 def _first(group: BaseExceptionGroup[BaseException]) -> BaseException:
-    first = group.exceptions[0]
-    return _first(first) if isinstance(first, BaseExceptionGroup) else first
+    """The exception a TaskGroup's failure stands for: a MemoryError if there is one, else the first."""
+    leaves: list[BaseException] = []
+
+    def walk(g: BaseExceptionGroup[BaseException]) -> None:
+        for e in g.exceptions:
+            if isinstance(e, BaseExceptionGroup):
+                walk(e)
+            else:
+                leaves.append(e)
+
+    walk(group)
+    return next((e for e in leaves if isinstance(e, MemoryError)), leaves[0])
 
 
 class AsyncAtgeoClient:
@@ -88,6 +98,7 @@ class AsyncAtgeoClient:
                 ) from e
             transport = AiohttpTransport()
         self._transport = transport
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def search_places(
         self,
@@ -101,13 +112,15 @@ class AsyncAtgeoClient:
         """Search a region; the text, and the precise region, never leave the device (README, Privacy)."""
         engine = self._engine
         plan = engine.plan(region, text, dataset, collection, sort)
+        self._check_loop()
 
         lists: list[TileList | None] = [engine.cached_tile_list(r.key) for r in plan.lists]
         missing = [i for i, cached in enumerate(lists) if cached is None]
         if missing:
 
             async def fetch_list(i: int, r: TileListRequest) -> None:
-                lists[i] = engine.store_tile_list(r.key, await self._transport.get(r.url))
+                response = await self._transport.get(r.url)
+                lists[i] = await _in_thread(lambda: engine.store_tile_list(r.key, response))
 
             try:
                 async with asyncio.TaskGroup() as group:  # one failing cancels the other (contract §14)
@@ -156,21 +169,43 @@ class AsyncAtgeoClient:
 
     async def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""
-        cached = await _in_thread(lambda: self._engine.cached_place(origin))
+        self._check_loop()
+        engine = self._engine
+        cached = await _in_thread(lambda: engine.cached_place(origin))
         if cached is not None:
             return cached
-        return self._engine.read_place(origin, await self._transport.get(self._engine.place_url(origin)))
+        response = await self._transport.get(engine.place_url(origin))
+        return await _in_thread(lambda: engine.read_place(origin, response))
 
     async def describe_service(self) -> ServiceDescription:
         """The server's DID and tilesets; cached for an hour."""
-        cached = self._engine.cached_service()
+        self._check_loop()
+        engine = self._engine
+        cached = engine.cached_service()
         if cached is not None:
             return cached
-        return self._engine.store_service(await self._transport.get(self._engine.service_url()))
+        response = await self._transport.get(engine.service_url())
+        return await _in_thread(lambda: engine.store_service(response))
 
     async def describe_tileset(self, slug: str) -> Tileset:
         """A tileset's descriptor; not cached."""
-        return self._engine.read_tileset(await self._transport.get(self._engine.tileset_url(slug)))
+        self._check_loop()
+        response = await self._transport.get(self._engine.tileset_url(slug))
+        return await _in_thread(lambda: self._engine.read_tileset(response))
+
+    def _check_loop(self) -> None:
+        # The default transport's session belongs to the loop of its first request. Checked here, before any
+        # request, so that a search from another loop raises rather than counting every tile as failed.
+        if not self._owns_transport:
+            return
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif loop is not self._loop:
+            raise RuntimeError(
+                "this AsyncAtgeoClient's default transport belongs to the event loop of its first call; "
+                "make one client per event loop"
+            )
 
     async def aclose(self) -> None:
         """Close the transport, if the client made it."""

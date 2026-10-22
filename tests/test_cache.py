@@ -165,6 +165,28 @@ class TestGetPlaceCacheScan:
         assert client.get_place(place_origin("x")).place["name"] == "Copy A"
 
 
+class TestGetPlaceScanRecency:
+    def test_leaves_the_eviction_order_alone(self, make: Make) -> None:
+        # Two tiles fill the budget; a scan that found the older one must not save it from eviction.
+        def tile(n: str) -> FakeTile:
+            return FakeTile(tile_url(n), [record(place(n, n.upper(), [point(37.775, -122.415)]))])
+
+        fake = FakeServer(
+            tilesets=[overture([tile("a"), tile("b"), tile("c")])],
+            tiles_for=lambda bbox: [tile_url({"-122.42": "a", "-100.50": "b"}.get(bbox[:7], "c"))],
+        )
+        size = len(fake.handle(tile_url("a")).body)
+        client = make(fake, cache_budget_bytes=2 * size + 10)
+        client.search_places(REGION)  # caches a
+        client.search_places(Bbox(-100.5, 10.5, -100.4, 10.6))  # caches b; a is now least recently used
+        client.get_place(place_origin("a"))  # answered from the cache, touching nothing
+        client.search_places(Bbox(10.5, 10.5, 10.6, 10.6))  # caches c, which evicts a, not b
+        fake.go_offline()
+        assert client.get_place(place_origin("b")).name == "B"
+        with pytest.raises(ConnectionError):
+            client.get_place(place_origin("a"))
+
+
 class TestParsedTileMemo:
     """No reference counterpart: the memo of the latest search's parsed tiles (contract §10's freedom)."""
 

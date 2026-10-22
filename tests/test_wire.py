@@ -9,6 +9,7 @@ import pytest
 
 from atgeo._cache import ParsedTiles, TileCache, TileEntry, TtlCache
 from atgeo._locations import coordinate, locate
+from atgeo._urls import is_http_url, prepare_url
 from atgeo._wire import (
     TileList,
     TileRecord,
@@ -290,6 +291,12 @@ class TestTileCache:
         cache.set("big", entry(size=201))
         assert (cache.urls(), cache.total) == ([], 0)
 
+    def test_keeps_a_total_of_exactly_the_budget(self) -> None:
+        cache = TileCache(300)
+        for url in "abc":
+            cache.set(url, entry(size=100))
+        assert (cache.urls(), cache.total) == (["a", "b", "c"], 300)
+
     def test_replacing_a_url_subtracts_the_old_size(self) -> None:
         cache = TileCache(1000)
         cache.set("a", entry(size=600))
@@ -339,3 +346,22 @@ class TestTtlCache:
         now[0] = 3600
         cache.set("new", 9)
         assert len(cache) == 1
+
+
+class TestPrepareUrl:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://h/t/a.json", "https://h/t/a.json"),
+            (" https://h/t/a.json \n", "https://h/t/a.json"),  # WHATWG trims C0 controls and spaces
+            ("https://h/t/a b\tc.json", "https://h/t/a%20bc.json"),
+            ("https://h/café.json", "https://h/caf%C3%A9.json"),
+            ("https://h/%2c%7E", "https://h/%2c%7E"),
+        ],
+    )
+    def test_prepares_as_whatwg_does_for_these_characters(self, url: str, expected: str) -> None:
+        assert prepare_url(url) == expected
+
+    @pytest.mark.parametrize("url", ["https://u:p@h/x", "https://u@h/x", "file:///x", "h/x", "https://:0/"])
+    def test_refuses_what_is_not_an_http_url_without_credentials(self, url: str) -> None:
+        assert is_http_url(url) is False

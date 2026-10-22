@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from atgeo.transport import HttpResponse
+from atgeo.transport import HttpResponse, prepare_url
 
 DEFAULT_SERVER = "https://places.atgeo.org"
 PUBLISHED_AT = "2026-01-01T00:00:00Z"
@@ -160,7 +160,7 @@ class FakeServer:
             return self._xrpc(nsid, params)
         for tileset in self.tilesets:
             for tile in tileset.tiles:
-                if tile.url == url:
+                if url in (tile.url, prepare_url(tile.url)):  # the clients send a non-ASCII URL percent-encoded
                     if url in self.fail_tiles:
                         return HttpResponse(500, b"upstream error")
                     return _json(self._tile_body(tileset, tile.records))

@@ -174,11 +174,13 @@ def distance_to(loc: Located, lat: float, lon: float) -> float | None:
     phi0 = lat * math.pi / 180
     d_lon = _gap(lon_star, lon) * math.pi / 180
     phi_c = math.atan2(math.sin(phi0), math.cos(phi0) * math.cos(d_lon)) * 180 / math.pi
-    return min(
+    candidates = (
         haversine(lat, lon, min(max(phi_c, box.south), box.north), lon_star),
         haversine(lat, lon, box.south, lon_star),
         haversine(lat, lon, box.north, lon_star),
     )
+    # Math.min is NaN if any argument is; min() skips a NaN that is not first.
+    return math.nan if any(math.isnan(d) for d in candidates) else min(candidates)
 
 
 def in_region(loc: Located, region: Region) -> bool:

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from atgeo import AsyncAtgeoClient, AtgeoClient, AtgeoDecodingError, AtgeoError, Bbox, Circle
+from atgeo import AsyncAtgeoClient, AtgeoClient, AtgeoDecodingError, AtgeoError, Bbox, Circle, TileCounts
 from atgeo.transport import HttpResponse
 
 from .conftest import Make
@@ -248,3 +248,35 @@ def empty_dataset_tileset() -> FakeTileset:
     return FakeTileset(
         "empty", [{"dataset": "", "collection": "c"}], [FakeTile(tile_url("e"), [record(value), record(other)])]
     )
+
+
+class TestReviewRegressions:
+    """Found by review; each would otherwise fail a search, leak, or diverge from the reference."""
+
+    def test_fail_the_search_on_a_memory_error_in_a_tile(self, make: Make) -> None:
+        def answer(url: str) -> HttpResponse | None:
+            if url == tile_url("t"):
+                raise MemoryError
+            return None
+
+        fake = FakeServer(tilesets=[overture([FakeTile(tile_url("t"), [record(ok("a"))])])], answer=answer)
+        with pytest.raises(MemoryError):
+            make(fake).search_places(REGION)
+
+    @pytest.mark.parametrize("bad", ["https://user:pw@tiles.example/a.json", "https://user@tiles.example/a.json"])
+    def test_count_a_tile_url_with_credentials_as_failed_without_a_request(self, make: Make, bad: str) -> None:
+        fake = FakeServer(answer=lambda url: raw(json.dumps({"tiles": [bad]})) if "getTiles" in url else None)
+        result = make(fake).search_places(REGION)
+        assert result.tiles == TileCounts(fetched=0, failed=1)
+        assert all(bad not in r for r in fake.requests)
+
+    def test_send_a_lone_surrogate_as_the_replacement_character(self, make: Make) -> None:
+        fake = FakeServer()
+        with pytest.raises(AtgeoError):
+            make(fake).get_place("urn:\ud800x")
+        assert fake.requests[0].endswith("?uri=urn%3A%EF%BF%BDx")
+
+    def test_return_the_callers_origin_from_the_network(self, make: Make) -> None:
+        body = raw('{"uri": "https://elsewhere.example/r/9", "record": {"name": "N", "origin": "urn:x:y:z:9"}}')
+        fake = FakeServer(answer=lambda url: body if "getPlace" in url else None)
+        assert make(fake).get_place("https://example.org/r/1").origin == "https://example.org/r/1"

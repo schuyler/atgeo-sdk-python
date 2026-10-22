@@ -118,6 +118,32 @@ class TestDeduplication:
         assert [h.origin for h in result.places] == ["https://example.org/r/1"]
 
 
+class TestPipelineOrder:
+    """No reference counterpart: what contract §4.3 and §4.6 fix that no ported test pins."""
+
+    def test_takes_the_copy_from_the_lowest_tile_url_by_utf16_code_units(self, make: Make) -> None:
+        # Code-point order puts U+FF61 first; UTF-16 order puts the astral character first.
+        low, high = "https://tiles.example/\U00010000.json", "https://tiles.example/\uff61.json"
+        fake = FakeServer(
+            tilesets=[
+                overture(
+                    [
+                        FakeTile(high, [record(place("x", "High", [point(37.775, -122.415)]))]),
+                        FakeTile(low, [record(place("x", "Low", [point(37.775, -122.415)]))]),
+                    ]
+                )
+            ]
+        )
+        places = make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).places
+        assert [h.place["name"] for h in places] == ["Low"]
+
+    def test_dedupes_before_the_region_filter_so_an_outside_winner_drops_the_place(self, make: Make) -> None:
+        outside = record(place("x", "Outside", [point(10, 10)]))
+        inside = record(place("x", "Inside", [point(37.775, -122.415)]))
+        fake = FakeServer(tilesets=[overture([FakeTile(tile_url("a"), [outside]), FakeTile(tile_url("b"), [inside])])])
+        assert make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).places == []
+
+
 class TestOrderingTies:
     region = Bbox(-122.42, 37.77, -122.41, 37.78)
 

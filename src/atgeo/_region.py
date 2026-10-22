@@ -80,10 +80,11 @@ def _circle_box(lat: float, lon: float, radius: float) -> tuple[float, float, fl
     min_lat = max(lat - half, -90.0)
     max_lat = min(lat + half, 90.0)
     # The spherical cap's true half-width; at or past 1 (or NaN) the cap holds a pole.
-    sin_half_lon = math.sin(half * _RAD) / math.cos(lat * _RAD)
+    # The reference's expressions, not _RAD: the bbox on the wire must match it to the last bit.
+    sin_half_lon = math.sin((half * math.pi) / 180) / math.cos((lat * math.pi) / 180)
     if min_lat == -90 or max_lat == 90 or not sin_half_lon < 1:
         return -180.0, min_lat, 180.0, max_lat
-    half_lon = math.asin(sin_half_lon) / _RAD
+    half_lon = (math.asin(sin_half_lon) * 180) / math.pi
 
     def wrap(x: float) -> float:
         return x - 360 if x > 180 else x + 360 if x < -180 else x

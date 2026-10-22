@@ -49,9 +49,21 @@ class _Pool(Generic[_I, _O]):
         self._stop = False
         self._error: BaseException | None = None
         self.results: list[tuple[bool, _O | BaseException] | None] = [None] * len(items)
-        self._alive = min(limit, len(items))
-        for i in range(self._alive):
-            start_daemon(self._work, f"atgeo-{i}")
+        self._alive = 0
+        try:
+            for i in range(min(limit, len(items))):
+                with self._cond:
+                    self._alive += 1
+                try:
+                    start_daemon(self._work, f"atgeo-{i}")
+                except BaseException:
+                    with self._cond:
+                        self._alive -= 1
+                    raise
+        except BaseException:  # Ctrl-C while starting: the workers already running claim nothing more
+            with self._cond:
+                self._stop = True
+            raise
 
     def _work(self) -> None:
         try:
@@ -169,21 +181,29 @@ class AtgeoClient:
 
     def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""
-        cached = self._engine.cached_place(origin)
-        if cached is not None:
-            return cached
-        return self._engine.read_place(origin, self._transport.get(self._engine.place_url(origin)))
+
+        def run() -> PlaceRecord:
+            cached = self._engine.cached_place(origin)
+            if cached is not None:
+                return cached
+            return self._engine.read_place(origin, self._transport.get(self._engine.place_url(origin)))
+
+        return _on_worker(run)
 
     def describe_service(self) -> ServiceDescription:
         """The server's DID and tilesets; cached for an hour."""
-        cached = self._engine.cached_service()
-        if cached is not None:
-            return cached
-        return self._engine.store_service(self._transport.get(self._engine.service_url()))
+
+        def run() -> ServiceDescription:
+            cached = self._engine.cached_service()
+            if cached is not None:
+                return cached
+            return self._engine.store_service(self._transport.get(self._engine.service_url()))
+
+        return _on_worker(run)
 
     def describe_tileset(self, slug: str) -> Tileset:
         """A tileset's descriptor; not cached."""
-        return self._engine.read_tileset(self._transport.get(self._engine.tileset_url(slug)))
+        return _on_worker(lambda: self._engine.read_tileset(self._transport.get(self._engine.tileset_url(slug))))
 
     def close(self) -> None:
         """Close the transport, if the client made it."""
@@ -195,6 +215,14 @@ class AtgeoClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _on_worker(fn: Callable[[], _O]) -> _O:
+    """Run a call on one of the client's own threads, never the app's: a response is parsed there, with
+    the 8 MiB stack deeply nested JSON needs, and the wait is in slices, so Ctrl-C returns control."""
+    pool: _Pool[None, _O] = _Pool([None], lambda _: fn(), 1, fail_fast=True)
+    pool.wait()
+    return _value(pool.results[0])
 
 
 def _value(result: tuple[bool, _O | BaseException] | None) -> _O:
