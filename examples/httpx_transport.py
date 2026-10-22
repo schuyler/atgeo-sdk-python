@@ -3,7 +3,8 @@
 Copy it into your app; it is not part of the atgeo package. It does what the default transports do:
 no redirect following of its own (``next_hop`` decides, and a redirect's body is never read), raw bytes
 through ``CappedBody``, no cookies, no ``.netrc`` (``trust_env`` off, proxies chosen here), and a
-deadline on the whole response. httpx does not retry.
+deadline on the redirects and the body (not on headers trickled a byte at a time, which only the default
+transport's watchdog bounds). httpx does not retry.
 
     client = AtgeoClient(transport=HttpxTransport())
 """
@@ -35,7 +36,8 @@ class HttpxTransport:
         total_timeout: float = 120.0,
         max_body_bytes: int = 32 * 1024 * 1024,
     ) -> None:
-        self._timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
         self._total_timeout = total_timeout
         self._max_body_bytes = max_body_bytes
         self._proxies = urllib.request.getproxies()
@@ -54,7 +56,6 @@ class HttpxTransport:
                     trust_env=False,
                     follow_redirects=False,
                     cookies=http.cookiejar.CookieJar(policy=_NoCookies()),
-                    timeout=self._timeout,
                     proxy=proxy,
                 )
             return client
@@ -62,8 +63,12 @@ class HttpxTransport:
     def get(self, url: str) -> HttpResponse:
         deadline = time.monotonic() + self._total_timeout
         for _ in range(MAX_REDIRECTS + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("response took longer than total_timeout")
+            timeout = httpx.Timeout(min(self._read_timeout, remaining), connect=min(self._connect_timeout, remaining))
             try:
-                with self._client_for(url).stream("GET", url, headers=HEADERS) as r:
+                with self._client_for(url).stream("GET", url, headers=HEADERS, timeout=timeout) as r:
                     target = next_hop(url, r.status_code, r.headers.get("Location"))
                     if target is None:
                         return HttpResponse(r.status_code, self._read(r, deadline))

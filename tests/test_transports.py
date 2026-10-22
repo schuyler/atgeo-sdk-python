@@ -17,6 +17,7 @@ import zlib
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import aiohttp
 import pytest
 import urllib3.exceptions
 
@@ -66,23 +67,29 @@ class Kind:
 
 
 KINDS = [Kind("urllib3", Urllib3Transport), Kind("aiohttp", AiohttpTransport, is_async=True)]
+# CI's examples job sets ATGEO_EXAMPLES=1, so that an adapter that fails to import fails the job instead of
+# quietly dropping out of it.
+_REQUIRE_EXAMPLES = os.environ.get("ATGEO_EXAMPLES") == "1"
 try:
     from examples.requests_transport import RequestsTransport
 
     KINDS.append(Kind("requests", RequestsTransport))
 except ImportError:
-    pass
+    if _REQUIRE_EXAMPLES:
+        raise
 try:
     from examples.httpx_transport import HttpxTransport
 
     KINDS.append(Kind("httpx", HttpxTransport))
 except ImportError:
-    pass
+    if _REQUIRE_EXAMPLES:
+        raise
 
 SYNC_KINDS = [k for k in KINDS if not k.is_async]
 
 # "No answer arrived": what each library raises before a response, unwrapped (Python spec §3).
 NO_ANSWER: tuple[type[BaseException], ...] = (urllib3.exceptions.HTTPError, OSError)
+NO_ANSWER += (aiohttp.ClientError,)
 try:
     import httpx
 
@@ -148,7 +155,9 @@ class TestRedirects:
             fetch(server.url("/hop/11"))
         assert len(server.requests) == 11  # the first request and ten hops; the eleventh redirect is not followed
 
-    @pytest.mark.parametrize("location", ["file:///etc/hostname", "ftp://127.0.0.1/x", "data:,hi"])
+    @pytest.mark.parametrize(
+        "location", ["file:///etc/hostname", "ftp://127.0.0.1/x", "data:,hi", "http://user:secret@127.0.0.1/x"]
+    )
     def test_refuses_a_redirect_to_another_scheme(self, server: Loopback, fetch: Kind, location: str) -> None:
         server.handler = lambda _r, w: w.respond(302, b"", [("Location", location)])
         with pytest.raises(RedirectError):
@@ -351,7 +360,8 @@ class TestRequests:
 
     def test_keeps_no_cookie(self, server: Loopback, fetch: Kind) -> None:
         server.handler = lambda _r, w: w.respond(200, b"ok", [("Set-Cookie", "id=1; Path=/"), ("ETag", '"e"')])
-        fetch.session([server.url("/a"), server.url("/b")])  # one transport: a fresh one would prove nothing
+        # One transport: a fresh one would prove nothing. localhost, since a jar ignores cookies set by an IP address.
+        fetch.session([server.url("/a", host="localhost"), server.url("/b", host="localhost")])
         assert server.requests[1].header("Cookie") is None
         assert server.requests[1].header("If-None-Match") is None
 
@@ -493,3 +503,106 @@ class TestAiohttpTransport:
             asyncio.run(second())
         finally:
             asyncio.run(t.aclose())
+
+
+class TestTotalTimeout:
+    """total_timeout bounds the whole call: redirects and headers too, not just the final body."""
+
+    @pytest.mark.parametrize("kind", SYNC_KINDS, ids=repr)
+    def test_bounds_a_chain_of_slow_redirects(self, server: Loopback, kind: Kind) -> None:
+        def handle(r: Request, w: Writer) -> None:
+            time.sleep(0.3)
+            redirecting()(r, w)
+
+        server.handler = handle
+        start = time.monotonic()
+        with pytest.raises(NO_ANSWER):
+            kind(server.url("/hop/10"), read_timeout=1, total_timeout=1)
+        assert time.monotonic() - start < 2.5
+        assert len(server.requests) < 6
+
+    def test_bounds_headers_trickled_a_byte_at_a_time(self, server: Loopback) -> None:
+        def handle(_r: Request, w: Writer) -> None:
+            for byte in b"HTTP/1.1 200 OK\r\nX-Slow: " + b"x" * 200:
+                w.send(bytes([byte]))
+                time.sleep(0.02)
+
+        server.handler = handle
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="total_timeout"):
+            KINDS[0](server.url(), read_timeout=1, total_timeout=0.5)
+        assert time.monotonic() - start < 1.5
+
+
+class TestProxyPrivacy:
+    @pytest.fixture
+    def refusing_proxy(self) -> Iterator[Loopback]:
+        with Loopback() as p:
+            p.handler = lambda _r, w: w.respond(502)
+            yield p
+
+    def test_tunnels_with_only_fixed_headers_and_keeps_the_password_out_of_errors(
+        self, refusing_proxy: Loopback, fetch: Kind, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("https_proxy", f"http://user:hunter2@127.0.0.1:{refusing_proxy.port}")
+        with pytest.raises(NO_ANSWER) as e:
+            fetch("https://proxied.invalid/x")
+        chain: list[BaseException] = []
+        error: BaseException | None = e.value
+        while error is not None and len(chain) < 10:
+            chain.append(error)
+            error = error.__cause__ or error.__context__
+        assert all("hunter2" not in repr(x) for x in chain)
+        (connect,) = refusing_proxy.requests
+        assert connect.method == "CONNECT"
+        assert connect.header("Proxy-Authorization") == "Basic " + base64.b64encode(b"user:hunter2").decode()
+        if fetch.name in ("urllib3", "aiohttp"):
+            assert connect.header("User-Agent") in (None, "atgeo-client-python")
+            assert connect.header("Accept-Language") is None
+
+    def test_never_sends_the_proxy_password_to_the_server(
+        self, server: Loopback, fetch: Kind, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A bypassed host: the request goes direct and must carry no proxy credentials.
+        monkeypatch.setenv("http_proxy", "http://user:hunter2@127.0.0.1:9")
+        monkeypatch.setenv("no_proxy", "localhost")
+        fetch(server.url("/x", host="localhost"))
+        assert server.requests[0].header("Proxy-Authorization") is None
+
+
+class TestCredentials:
+    def test_reads_no_netrc(
+        self, server: Loopback, fetch: Kind, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        netrc = tmp_path / "netrc"
+        netrc.write_text("machine localhost login me password secret\nmachine 127.0.0.1 login me password secret\n")
+        netrc.chmod(0o600)
+        monkeypatch.setenv("NETRC", str(netrc))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".netrc").write_text(netrc.read_text())
+        (tmp_path / ".netrc").chmod(0o600)
+        fetch(server.url("/x", host="localhost"))
+        assert server.requests[0].header("Authorization") is None
+
+
+@pytest.mark.skipif(not any(k.name == "requests" for k in KINDS), reason="needs requests")
+class TestRequestsAdapterWithTheAppsSession:
+    def test_sends_none_of_the_sessions_credentials_or_headers_and_leaves_it_alone(self, server: Loopback) -> None:
+        import requests  # noqa: PLC0415
+
+        from examples.requests_transport import RequestsTransport  # noqa: PLC0415
+
+        with Loopback() as other:
+            server.handler = lambda _r, w: w.respond(302, b"", [("Location", other.url("/steal", host="localhost"))])
+            session = requests.Session()
+            session.auth = ("appuser", "apppass")
+            session.headers["Authorization"] = "Bearer app-token"
+            session.headers["X-App"] = "1"
+            session.cookies.set("sid", "abc")
+            RequestsTransport(session=session).get(server.url("/x"))
+            for r in [*server.requests, *other.requests]:
+                assert r.header("Authorization") is None
+                assert r.header("X-App") is None
+                assert r.header("Cookie") is None
+            assert session.trust_env is True
+            assert session.cookies.get("sid") == "abc"

@@ -14,9 +14,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Proxy:
-    url: str  # without credentials
-    basic_auth: str | None  # "user:password", unquoted, for urllib3's Proxy-Authorization
-    raw: str  # as configured, credentials included, for aiohttp
+    url: str  # without credentials, so that they never reach an exception message
+    username: str | None  # unquoted
+    password: str | None
+
+    @property
+    def basic_auth(self) -> str | None:
+        """ "user:password", for urllib3's Proxy-Authorization."""
+        return None if self.username is None else f"{self.username}:{self.password or ''}"
 
 
 def _parse(raw: str) -> Proxy:
@@ -30,10 +35,9 @@ def _parse(raw: str) -> Proxy:
         raise ValueError(f"unsupported proxy URL: {raw.split('@')[-1]!r}")
     host = parts.hostname if ":" not in parts.hostname else f"[{parts.hostname}]"
     netloc = host if parts.port is None else f"{host}:{parts.port}"
-    auth = None
-    if parts.username is not None:
-        auth = f"{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password or '')}"
-    return Proxy(f"{scheme}://{netloc}", auth, raw)
+    username = urllib.parse.unquote(parts.username) if parts.username is not None else None
+    password = urllib.parse.unquote(parts.password) if parts.password is not None else None
+    return Proxy(f"{scheme}://{netloc}", username, password)
 
 
 class Proxies:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ssl
+import urllib.parse
+from typing import Any
 
 import aiohttp
 import yarl
@@ -56,9 +59,23 @@ class AiohttpTransport:
             )
         return self._session
 
-    def _proxy_for(self, url: str) -> str | None:
+    def _request_options(self, url: str) -> dict[str, Any]:
+        """The headers and proxy options for one request."""
         proxy = self._proxies.for_url(url)
-        return proxy.raw if proxy is not None else None  # aiohttp sends the URL's credentials itself
+        if proxy is None:
+            return {"headers": HEADERS}
+        # The credentials go as a header, never in the proxy URL, so that aiohttp's errors (which quote that
+        # URL) never carry them. An https request tunnels with CONNECT, which carries proxy_headers, and our
+        # User-Agent rather than aiohttp's, which names its version. A plain http request goes to the proxy in
+        # absolute form, with its own headers; only then may Proxy-Authorization join them, since an https
+        # request's headers travel through the tunnel to the server.
+        auth = None
+        if proxy.basic_auth is not None:
+            auth = "Basic " + base64.b64encode(proxy.basic_auth.encode()).decode()
+        if urllib.parse.urlsplit(url).scheme == "https":
+            connect = {"User-Agent": HEADERS["User-Agent"], **({"Proxy-Authorization": auth} if auth else {})}
+            return {"headers": HEADERS, "proxy": proxy.url, "proxy_headers": connect}
+        return {"headers": {**HEADERS, **({"Proxy-Authorization": auth} if auth else {})}, "proxy": proxy.url}
 
     async def get(self, url: str) -> HttpResponse:
         session = self._session_for_running_loop()
@@ -67,8 +84,7 @@ class AiohttpTransport:
             async with session.get(
                 yarl.URL(url, encoded=True),
                 allow_redirects=False,
-                headers=HEADERS,
-                proxy=self._proxy_for(url),
+                **self._request_options(url),
             ) as r:
                 target = next_hop(url, r.status, r.headers.get("Location"))
                 if target is None:
