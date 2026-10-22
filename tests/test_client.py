@@ -4,12 +4,13 @@ test_imports.py's job here."""
 from __future__ import annotations
 
 import asyncio
+import json
 import urllib.parse
 from typing import Any, ClassVar
 
 import pytest
 
-from atgeo import AtgeoError, Bbox, Circle, PlaceRecord, Region, SortMode
+from atgeo import AsyncAtgeoClient, AtgeoError, Bbox, Circle, PlaceRecord, Region, SortMode
 from atgeo.types import (
     CategoryCount,
     CollectionAttribution,
@@ -362,6 +363,13 @@ class TestConstruction:
         with pytest.raises(ValueError, match="absolute http or https URL"):
             make(FakeServer(), server=server)
 
+    def test_takes_an_int_like_cache_budget(self, make: Make) -> None:
+        class IntLike:
+            def __index__(self) -> int:
+                return 1024
+
+        assert make(FakeServer(), cache_budget_bytes=IntLike()).search_places(REGION).complete
+
     @pytest.mark.parametrize("budget", [None, "52428800", 1.5, True])
     def test_refuses_a_cache_budget_that_is_not_an_int(self, make: Make, budget: object) -> None:
         # Unchecked, it failed inside every tile store: each tile counted as failed, and no search raised.
@@ -471,6 +479,32 @@ class TestClosing:
             assert client._transport._session is None  # type: ignore[attr-defined]
 
         asyncio.run(main())
+
+    def test_refuses_a_search_whose_tile_lists_are_cached_after_aclose(self) -> None:
+        # Such a search sends only tile requests: without the client's own check, the closed transport would
+        # fail each one, and the search would return no places, complete=False, and no error.
+        from .loopback import Loopback, Request, Writer  # noqa: PLC0415
+
+        base = ""
+
+        def handle(r: Request, w: Writer) -> None:
+            if "getTiles" in r.target:
+                w.respond(200, json.dumps({"tiles": [f"{base}/tiles/a.json"]}).encode())
+            else:
+                w.respond(200, b'{"records":[]}')
+
+        with Loopback(handler=handle) as server:
+            base = server.url("")
+
+            async def main() -> None:
+                client = AsyncAtgeoClient(base)
+                assert (await client.search_places(REGION)).complete
+                await client.aclose()
+                with pytest.raises(RuntimeError, match="is closed"):
+                    await client.search_places(REGION)
+
+            asyncio.run(main())
+            assert sum("getTiles" in r.target for r in server.requests) == 1
 
     def test_a_closed_aiohttp_transport_refuses_requests(self) -> None:
 

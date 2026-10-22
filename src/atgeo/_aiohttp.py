@@ -22,7 +22,8 @@ class AiohttpTransport:
     """An aiohttp transport with no cookies, no ``.netrc`` and no total timeout (the task can be cancelled).
 
     Its session is made on the first request, inside the running event loop, and belongs to that loop:
-    a request from another loop raises RuntimeError. Make one per event loop.
+    a request from another loop raises RuntimeError. Make one per event loop. After ``aclose()`` it refuses
+    every request with RuntimeError.
     """
 
     def __init__(
