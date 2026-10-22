@@ -11,7 +11,16 @@ from typing import Any
 
 import pytest
 
-from atgeo import AsyncAtgeoClient, AtgeoClient, AtgeoDecodingError, AtgeoError, Bbox, Circle, TileCounts
+from atgeo import (
+    AsyncAtgeoClient,
+    AtgeoClient,
+    AtgeoDecodingError,
+    AtgeoError,
+    Bbox,
+    Circle,
+    TileCounts,
+    TileFailureKind,
+)
 from atgeo.transport import HttpResponse
 
 from .conftest import Make
@@ -154,6 +163,10 @@ class TestTileRecords:
         )
         result = make(fake).search_places(REGION)
         assert (result.tiles.fetched, result.tiles.failed) == (1, 1)
+        # The server's input overflowed the parser, so the tile failed to decode (contract §4.4).
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind) == (tile_url("deep"), TileFailureKind.DECODE)
+        assert isinstance(failure.error, RecursionError)
 
 
 class TestPlaceValues:

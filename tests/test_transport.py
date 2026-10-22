@@ -196,6 +196,8 @@ class TestTileFailures:
             "file:///etc/hostname",
             "https://user:pw@tiles.example/a.json",
             "https://user@tiles.example/a.json",
+            "https://:pw@tiles.example/a.json",
+            "https://@tiles.example/a.json",  # no credentials, but a margin this port refuses (CONFORMANCE.md)
         ],
     )
     def test_reports_a_refused_url_without_a_request(self, make: Make, bad: str) -> None:

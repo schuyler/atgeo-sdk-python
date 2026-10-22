@@ -265,6 +265,7 @@ class Engine:
         )
         # Logged once the search has a result: a search that fails reports no failed tiles (contract §4.4).
         # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).
+        # The tile URL reveals the coarse area searched; stdlib logging has no notion of a private field to mark.
         for f in failures:
             _log.debug("tile failed: %s (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
         return result

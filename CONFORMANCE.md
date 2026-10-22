@@ -40,7 +40,7 @@ The default transports ask for gzip and accept only gzip or no encoding. A body 
 
 Every URL is prepared before a transport sees it: leading and trailing spaces and control characters are trimmed, tab, LF and CR are dropped, and space, other control characters and non-ASCII are percent-encoded as UTF-8, which is what the reference's WHATWG URL parsing does to those characters. The other WHATWG rules are not reproduced: a backslash is not read as `/`, `.` and `..` path segments are not resolved, and a non-ASCII host is percent-encoded rather than turned into punycode (`bücher.example` is `b%C3%BCcher.example` here and `xn--bcher-kva.example` there), so a tile on such a host fails. urllib3 sends a lowercase escape uppercased (`%2c` as `%2C`), which decodes the same.
 
-A tile URL that is not an absolute `http` or `https` URL, or that has credentials in it, is a failed tile of kind `refused`, as it is under Node's `fetch`, whose `Request` refuses credentials. A redirect to any other scheme or to a URL with credentials is a `RedirectError`, and so is an eleventh redirect.
+A tile URL that is not an absolute `http` or `https` URL, or that has credentials in it, is a failed tile of kind `refused`, as it is under Node's `fetch`, whose `Request` refuses credentials. So is a URL with an empty userinfo (`https://@tiles.example/a.json`, or `https://:@…`): it carries no credentials and the reference fetches it, but the contract lets a port refuse it, and no compliant server sends one. A redirect to any other scheme or to a URL with credentials is a `RedirectError`, and so is an eleventh redirect.
 
 A query value holding a lone surrogate (from a Python string; JSON can carry one) is sent with U+FFFD in its place, as `URLSearchParams` sends it.
 
