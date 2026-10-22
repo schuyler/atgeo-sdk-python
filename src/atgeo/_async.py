@@ -99,6 +99,7 @@ class AsyncAtgeoClient:
             transport = AiohttpTransport()
         self._transport = transport
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closed = False
 
     async def search_places(
         self,
@@ -198,6 +199,9 @@ class AsyncAtgeoClient:
         # request, so that a search from another loop raises rather than counting every tile as failed.
         if not self._owns_transport:
             return
+        # A closed transport refuses every request, which inside a search would count each tile as failed.
+        if self._closed:
+            raise RuntimeError("this AsyncAtgeoClient is closed")
         loop = asyncio.get_running_loop()
         if self._loop is None:
             self._loop = loop
@@ -208,8 +212,9 @@ class AsyncAtgeoClient:
             )
 
     async def aclose(self) -> None:
-        """Close the transport, if the client made it."""
+        """Close the transport, if the client made it; such a client then refuses every call."""
         if self._owns_transport:
+            self._closed = True
             await self._transport.aclose()  # type: ignore[attr-defined]
 
     async def __aenter__(self) -> Self:

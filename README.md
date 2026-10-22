@@ -57,9 +57,9 @@ atgeo = AtgeoClient(
 )
 ```
 
-Make one per server and share it: `AtgeoClient` is safe to call from many threads at once, `AsyncAtgeoClient` from many tasks, and their caches are what make repeat searches free. Both default transports pool connections, so use the client in a `with` (`async with`) block or call `close()` (`await aclose()`) when you're done. A client closes only a transport it made.
+Make one per server and share it: `AtgeoClient` is safe to call from many threads at once, `AsyncAtgeoClient` from many tasks, and their caches are what make repeat searches free. Both default transports pool connections, so use the client in a `with` (`async with`) block or call `close()` (`await aclose()`) when you're done. A client closes only a transport it made. An `AsyncAtgeoClient` that has closed its own transport raises `RuntimeError` on any later call, rather than opening an aiohttp session that nothing would close.
 
-`server` must be an absolute `http` or `https` URL without credentials in it; anything else is a `ValueError`. Without the check, urllib3 would fetch `places.atgeo.org/...` over cleartext HTTP with nothing but a warning, and a `user:password@` would be dropped by one default transport and sent by the other. A tile URL with credentials is a failed tile, as it is under the reference's `fetch`.
+`cache_budget_bytes` must be a non-negative integer (an `int`, or an int-like such as `numpy.int64`); anything else is a `TypeError` or `ValueError` when the client is made. `server` must be an absolute `http` or `https` URL without credentials in it; anything else is a `ValueError`. Without the check, urllib3 would fetch `places.atgeo.org/...` over cleartext HTTP with nothing but a warning, and a `user:password@` would be dropped by one default transport and sent by the other. A tile URL with credentials is a failed tile, as it is under the reference's `fetch`.
 
 The async client's default transport holds an aiohttp session, and aiohttp sessions belong to the event loop they were first used in. So a client using it belongs to the loop of its first call, and using it from another raises a `RuntimeError` that says so. A script that calls `asyncio.run` more than once should make a client inside each.
 

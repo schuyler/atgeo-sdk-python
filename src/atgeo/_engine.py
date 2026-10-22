@@ -8,6 +8,7 @@ in the same order, so the two clients cannot drift apart.
 
 from __future__ import annotations
 
+import operator
 import threading
 import urllib.parse
 from collections.abc import Callable, Sequence
@@ -74,9 +75,24 @@ def _scalar_values(s: str) -> str:
     return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
+def check_budget(budget: int) -> int:
+    """A byte count. Checked here, since a wrong type would otherwise fail inside every tile store, where it
+    would count as a failed tile and every search would come back empty instead of raising."""
+    if isinstance(budget, bool):
+        raise TypeError("cache_budget_bytes must be an int, not bool")
+    try:
+        budget = operator.index(budget)  # an int, or an int-like such as numpy.int64; not a float or a str
+    except TypeError:
+        raise TypeError(f"cache_budget_bytes must be an int, not {type(budget).__name__}") from None
+    if budget < 0:
+        raise ValueError(f"cache_budget_bytes must not be negative, not {budget}")
+    return budget
+
+
 class Engine:
     def __init__(self, server: str, cache_budget_bytes: int, clock: Callable[[], float]) -> None:
         self._base = check_server(server)
+        cache_budget_bytes = check_budget(cache_budget_bytes)
         self._lock = threading.Lock()
         self._tiles = TileCache(cache_budget_bytes)
         self._parsed = ParsedTiles()
