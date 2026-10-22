@@ -59,7 +59,7 @@ atgeo = AtgeoClient(
 
 Make one per server and share it: `AtgeoClient` is safe to call from many threads at once, `AsyncAtgeoClient` from many tasks, and their caches are what make repeat searches free. Both default transports pool connections, so use the client in a `with` (`async with`) block or call `close()` (`await aclose()`) when you're done. A client closes only a transport it made.
 
-`server` must be an absolute `http` or `https` URL; anything else is a `ValueError`, because urllib3 would otherwise fetch `places.atgeo.org/...` over cleartext HTTP with nothing but a warning.
+`server` must be an absolute `http` or `https` URL without credentials in it; anything else is a `ValueError`. Without the check, urllib3 would fetch `places.atgeo.org/...` over cleartext HTTP with nothing but a warning, and a `user:password@` would be dropped by one default transport and sent by the other. A tile URL with credentials is a failed tile, as it is under the reference's `fetch`.
 
 The async client's default transport holds an aiohttp session, and aiohttp sessions belong to the event loop they were first used in. So a client using it belongs to the loop of its first call, and using it from another raises a `RuntimeError` that says so. A script that calls `asyncio.run` more than once should make a client inside each.
 
@@ -72,12 +72,12 @@ The defaults, `Urllib3Transport` and `AiohttpTransport`, both:
 - follow redirects themselves, one hop at a time, without reading a redirect's body, refusing anything but `http` and `https` and giving up after ten;
 - ask for gzip and decode it themselves, refusing a body larger than `max_body_bytes` (32 MiB) once decoded, because the server chooses the tile URLs and a small gzip body can decode to gigabytes;
 - send each request once, keep no cookies and no cache, and never read `~/.netrc`;
-- take proxies from `http_proxy`, `https_proxy`, `all_proxy` and `no_proxy`, read when the transport is made (`no_proxy` is checked on every request). SOCKS proxies aren't supported and are refused when the transport is made, and CIDR entries in `no_proxy` (`10.0.0.0/8`) aren't understood, because `urllib.request.proxy_bypass` doesn't understand them;
+- take proxies from `http_proxy`, `https_proxy`, `all_proxy` and `no_proxy`, read when the transport is made (`no_proxy` is checked on every request), or on macOS and Windows from the system's proxy settings when those are unset, since that's what `urllib.request.getproxies()` does. SOCKS proxies aren't supported and are refused when the transport is made, and CIDR entries in `no_proxy` (`10.0.0.0/8`) aren't understood, because `urllib.request.proxy_bypass` doesn't understand them;
 - verify TLS against the operating system's certificate store, through truststore. Pass `ssl_context=` for your own certificate authority.
 
-Their timeouts are per socket operation: 10 seconds to connect, 30 seconds between bytes. `Urllib3Transport` also gives a whole response 120 seconds (`total_timeout`), because a blocking call has no other way to give up on a server that sends one byte every 29 seconds.
+Their timeouts are per socket operation: 10 seconds to connect, 30 seconds between bytes. `Urllib3Transport` also gives the whole call 120 seconds (`total_timeout`), redirects and headers included, because a blocking call has no other way to give up on a server that sends one byte every 29 seconds. It raises `TimeoutError` when it runs out.
 
-If your app already has a configured `requests.Session` or uses httpx, copy [`examples/requests_transport.py`](examples/requests_transport.py) or [`examples/httpx_transport.py`](examples/httpx_transport.py). They're short, CI runs the transport tests against both, and they do what the defaults do. That takes more care than it looks: `requests.Session.send` reads a redirect's whole body into memory even with `allow_redirects=False`, so the requests adapter goes around it. Whatever transport you use, don't give it a disk cache, or the client's promise to keep nothing on disk goes with it.
+If your app already has a configured `requests.Session` or uses httpx, copy [`examples/requests_transport.py`](examples/requests_transport.py) or [`examples/httpx_transport.py`](examples/httpx_transport.py). They're short, CI runs the transport tests against both, and they do what the defaults do, except that `total_timeout` doesn't cover headers trickled a byte at a time. That takes more care than it looks: `requests.Session.send` reads a redirect's whole body into memory even with `allow_redirects=False`, and would send the session's own auth, headers and cookies to every host the server names, so the requests adapter borrows only the session's adapters (its TLS settings and connection pools) and leaves the session itself alone. Whatever transport you use, don't give it a disk cache, or the client's promise to keep nothing on disk goes with it.
 
 ## API
 
@@ -98,7 +98,7 @@ Everything after `region` is keyword-only, so `search_places(region, "Starbux")`
 With neither `dataset` nor `collection` you search `overturemaps.org` / `place`; with only `collection`, that collection of `overturemaps.org`; with only `dataset`, every collection of that dataset together; with both, that collection.
 
 ```python
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SearchResult:
     places: list[SearchHit]
     complete: bool  # False if any tile failed to load
@@ -106,7 +106,7 @@ class SearchResult:
     tiles: TileCounts  # fetched and failed
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SearchHit:
     origin: str | None  # place["origin"], else the tile record's uri, else None
     place: Mapping[str, Any]  # the record value, exactly as served
@@ -118,7 +118,7 @@ class SearchHit:
     location: PlaceLocation  # property: point and/or box, parsed as the client parsed them for distance
 ```
 
-`place` is the dict `json.loads` made of the gazetteer's record, every key in served order and every integer exact. **Don't change it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is the dict in that memo, so a change would show up in the next search. Copy it first (`dict(hit.place)`, or `copy.deepcopy`) if you need to; copying every place by default would cost three times what parsing does. It's annotated `Mapping`, so a type checker catches the mistake.
+`place` is the dict `json.loads` made of the gazetteer's record, every key in served order and every integer exact. **Don't change it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is the dict in that memo, so a change would show up in the next search. Copy it first with `copy.deepcopy(hit.place)` if you need to (`dict(hit.place)` copies only the top level, so its nested lists and dicts are still the cache's); copying every place by default would cost three times what parsing does. It's annotated `Mapping`, so a type checker catches the mistake.
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
@@ -146,7 +146,8 @@ A tileset's collections, attribution and extent. Not cached. The describe types 
 - `search_places` raises `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text, and `TypeError` for a region that isn't a `Circle` or a `Bbox`, before any request.
 - A failed `getTiles` fails the search. A failed tile does not: it's skipped, counted in `tiles.failed`, and `complete` is `False`.
 - A 2xx body that isn't JSON, or has nothing usable in it, raises `AtgeoDecodingError`, with the parser's error as its `__cause__`. It isn't a `ValueError`, so an `except ValueError` meant for a bad region won't swallow it. Retrying rarely helps; the server sends the same body again.
-- When no answer arrives at all, you get whatever the transport raised. Catch `(urllib3.exceptions.HTTPError, OSError)` with `Urllib3Transport` and `(aiohttp.ClientError, OSError)` with `AiohttpTransport`. Before a response, that's the library's own exception (urllib3's `MaxRetryError`, with the real cause in `.reason`, isn't an `OSError`); after one starts, a body that doesn't arrive whole is `atgeo.BodyError`, and a bad or endless redirect is `atgeo.RedirectError`, both `OSError`s. With the httpx adapter, add `httpx.HTTPError`.
+- When no answer arrives at all, you get whatever the transport raised. Catch `(urllib3.exceptions.HTTPError, OSError)` with `Urllib3Transport` and `(aiohttp.ClientError, OSError)` with `AiohttpTransport`. Before a response, that's the library's own exception, or `TimeoutError` when `total_timeout` runs out (urllib3's `MaxRetryError`, with the real cause in `.reason`, isn't an `OSError`); after one starts, a body that doesn't arrive whole is `atgeo.BodyError`, and a bad or endless redirect is `atgeo.RedirectError`, both `OSError`s. With the httpx adapter, add `httpx.HTTPError`.
+- `AsyncAtgeoClient` with its default transport raises `RuntimeError` when called from an event loop other than its first call's, before making any request.
 - Cancelling the task running an async call raises `asyncio.CancelledError`. A blocking search can be interrupted with Ctrl-C: it stops claiming tiles at once and raises `KeyboardInterrupt`, though the requests already in flight run on, on daemon threads, until they finish or time out.
 
 ## Privacy

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]  # 1.27 writes the License-Expression and License-File metadata
 build-backend = "hatchling.build"
 
 [project]
@@ -43,7 +43,7 @@ include = ["src/atgeo", "tests", "examples", "scripts", "README.md", "CONFORMANC
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
-markers = ["network: needs the public internet (deselected unless ATGEO_NETWORK_TESTS=1)"]
+markers = ["network: needs the public internet (skipped unless ATGEO_NETWORK_TESTS=1)"]
 filterwarnings = ["error"]
 
 [tool.ruff]
