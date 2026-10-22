@@ -26,15 +26,6 @@ from atgeo.transport import HEADERS, BodyError, CappedBody, HttpResponse, Redire
 
 from .loopback import Loopback, Request, Writer
 
-PROXY_VARS = ["http_proxy", "https_proxy", "all_proxy", "no_proxy"]
-
-
-@pytest.fixture(autouse=True)
-def no_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in PROXY_VARS:
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(name.upper(), raising=False)
-
 
 @pytest.fixture
 def server() -> Iterator[Loopback]:

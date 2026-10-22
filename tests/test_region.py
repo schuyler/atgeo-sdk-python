@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+import math
+import re
+import urllib.parse
+
 import pytest
 
 from atgeo._region import center, query_bboxes
 from atgeo.types import Bbox, Circle, Region
+
+from .conftest import Make
+from .fake_server import FakeServer, FakeTile, overture
+from .helpers import place, place_origin, point, record
+
+COORD = re.compile(r"^-?\d{1,3}\.\d{2}$")
+
+
+def bboxes_sent(fake: FakeServer) -> list[str]:
+    out = []
+    for u in fake.requests:
+        if "org.atgeo.getTiles" in u:
+            out.append(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query)).get("bbox", ""))
+    return out
+
+
+def emitted(make: Make, region: Region) -> list[str]:
+    fake = FakeServer()
+    make(fake).search_places(region)
+    return bboxes_sent(fake)
+
+
+def parse(bbox: str) -> list[float]:
+    return [float(x) for x in bbox.split(",")]
 
 
 class TestWorkedExamples:
@@ -37,3 +65,239 @@ class TestWorkedExamples:
     )
     def test_centre(self, region: Region, expected: tuple[float, float]) -> None:
         assert center(region) == expected
+
+
+class TestCoordinateSerialization:
+    @pytest.mark.parametrize(
+        "region",
+        [
+            pytest.param(Circle(37.7749295, -122.4194155, 250.123456), id="full GPS precision circle"),
+            pytest.param(Bbox(-122.4194155, 37.7749295, -122.4094155, 37.7849295), id="full GPS precision bbox"),
+            pytest.param(Bbox(-122.4, 37.7, -122.3, 37.8), id="trailing zeros"),
+            pytest.param(Bbox(1e-7, 1e-7, 2e-7, 2e-7), id="scientific notation tiny"),
+            pytest.param(Bbox(3.7749e1, 3.7749e1, 3.775e1, 3.776e1), id="scientific notation"),
+            pytest.param(Bbox(-1e-7, -2e-7, 1e-7, 2e-7), id="negative scientific notation"),
+            pytest.param(Circle(12.3456789, 98.7654321, 1e-9), id="tiny radius"),
+            pytest.param(Circle(12.3456789, 98.7654321, 0), id="radius zero"),
+            pytest.param(Bbox(10.123456, 20.123456, 10.123456, 20.123456), id="zero-area bbox"),
+            pytest.param(Bbox(-0.0, -0.0, 0, 0), id="negative zero bbox"),
+            pytest.param(Circle(-0.0, -0.0, 0), id="negative zero circle"),
+            pytest.param(Bbox(-0.0001, -0.0001, -0.00001, -0.00001), id="tiny negative"),
+            pytest.param(Circle(90, 0, 1000), id="circle at pole"),
+            pytest.param(Circle(0, 180, 1000), id="circle at antimeridian"),
+            pytest.param(Bbox(179.123456, 1.987654, -179.123456, 2.987654), id="crossing bbox"),
+        ],
+    )
+    def test_emits_only_two_decimal_coordinates(self, make: Make, region: Region) -> None:
+        sent = emitted(make, region)
+        assert len(sent) > 0
+        for bbox in sent:
+            parts = bbox.split(",")
+            assert len(parts) == 4
+            for c in parts:
+                assert COORD.match(c), c
+
+    def test_never_emits_a_coordinate_outside_the_valid_range(self, make: Make) -> None:
+        regions: list[Region] = [
+            Bbox(-180, -90, 180, 90),
+            Bbox(180, 90, 180, 90),
+            Bbox(-180, -90, -180, -90),
+            Circle(90, 180, 5),
+            Circle(-90, -180, 5),
+            Circle(89.999, 179.999, 100000),
+        ]
+        for region in regions:
+            for bbox in emitted(make, region):
+                min_lon, min_lat, max_lon, max_lat = parse(bbox)
+                assert min_lon >= -180
+                assert max_lon <= 180
+                assert min_lat >= -90
+                assert max_lat <= 90
+                assert min_lon < max_lon
+                assert min_lat < max_lat
+
+
+class TestOutwardSnapping:
+    def test_floors_mins_and_ceils_maxes(self, make: Make) -> None:
+        assert emitted(make, Bbox(-122.4194155, 37.7749295, -122.4094155, 37.7849295)) == [
+            "-122.42,37.77,-122.40,37.79"
+        ]
+
+    def test_contains_the_callers_region_for_arbitrary_precision_input(self, make: Make) -> None:
+        inputs = [
+            (-122.419415, 37.774929, -122.418001, 37.775001),
+            (0.001, 0.002, 0.003, 0.004),
+            (-0.004, -0.003, -0.002, -0.001),
+            (151.2093, -33.8688, 151.2193, -33.8588),
+            (-73.9857, 40.7484, -73.9757, 40.7584),
+        ]
+        for min_lon, min_lat, max_lon, max_lat in inputs:
+            [bbox] = emitted(make, Bbox(min_lon, min_lat, max_lon, max_lat))
+            a, b, c, d = parse(bbox)
+            assert a <= min_lon
+            assert b <= min_lat
+            assert c >= max_lon
+            assert d >= max_lat
+            assert c - a < max_lon - min_lon + 0.0201
+            assert d - b < max_lat - min_lat + 0.0201
+
+    def test_does_not_widen_a_grid_aligned_bbox_through_float_error(self, make: Make) -> None:
+        assert emitted(make, Bbox(-122.42, 37.77, -122.41, 37.78)) == ["-122.42,37.77,-122.41,37.78"]
+
+    def test_does_not_widen_grid_aligned_values_anywhere_on_the_grid(self, make: Make) -> None:
+        for k in range(0, 9000, 97):
+            lat = [(k + 1) / 100, (k + 6) / 100]
+            lon = [-(k + 8) / 100, -(k + 5) / 100]
+            expected = ",".join(f"{v:.2f}" for v in (lon[0], lat[0], lon[1], lat[1]))
+            assert emitted(make, Bbox(lon[0], lat[0], lon[1], lat[1])) == [expected]
+
+
+class TestDegenerateSpans:
+    def test_widens_a_grid_aligned_point_by_one_step(self, make: Make) -> None:
+        assert emitted(make, Bbox(10, 20, 10, 20)) == ["10.00,20.00,10.01,20.01"]
+
+    def test_widens_a_zero_radius_circle_on_the_grid(self, make: Make) -> None:
+        assert emitted(make, Circle(20, 10, 0)) == ["10.00,20.00,10.01,20.01"]
+
+    def test_widens_negative_zero(self, make: Make) -> None:
+        assert emitted(make, Bbox(-0.0, -0.0, 0, 0)) == ["0.00,0.00,0.01,0.01"]
+
+    def test_widens_a_line(self, make: Make) -> None:
+        assert emitted(make, Bbox(10, 20, 10.5, 20)) == ["10.00,20.00,10.50,20.01"]
+
+    def test_steps_min_down_at_latitude_90_and_longitude_180(self, make: Make) -> None:
+        assert emitted(make, Bbox(0, 90, 0, 90)) == ["0.00,89.99,0.01,90.00"]
+        assert emitted(make, Bbox(180, 0, 180, 0)) == ["179.99,0.00,180.00,0.01"]
+
+    def test_does_not_widen_a_span_that_snapping_already_opened(self, make: Make) -> None:
+        assert emitted(make, Bbox(10.005, 20.005, 10.005, 20.005)) == ["10.00,20.00,10.01,20.01"]
+
+
+class TestCircleToBbox:
+    def test_uses_111194_927_m_per_degree_of_latitude(self, make: Make) -> None:
+        assert emitted(make, Circle(0, 0, 111194.927)) == ["-1.00,-1.00,1.00,1.00"]
+
+    def test_widens_longitude_to_the_spherical_caps_half_width(self, make: Make) -> None:
+        [bbox] = emitted(make, Circle(60, 10, 111194.927))
+        min_lon, min_lat, max_lon, max_lat = parse(bbox)
+        assert abs(min_lat - 59) < 0.05  # toBeCloseTo(59, 1)
+        assert abs(max_lat - 61) < 0.05
+        assert 7.99 <= min_lon <= 8
+        assert 12 <= max_lon <= 12.01
+
+    # asin(sin 20° / cos 60°) = 43.16°; the flat 20° / cos 60° is 40°.
+    def test_reaches_the_caps_true_east_and_west_edges_at_high_latitude(self, make: Make) -> None:
+        assert emitted(make, Circle(60, 0, 20 * 111194.927)) == ["-43.17,40.00,43.17,80.00"]
+
+    def test_covers_all_longitudes_for_a_polar_circle(self, make: Make) -> None:
+        north = emitted(make, Circle(89.9, 12.34, 50000))
+        assert len(north) == 1
+        n_min_lon, n_min_lat, n_max_lon, n_max_lat = parse(north[0])
+        assert [n_min_lon, n_max_lon, n_max_lat] == [-180, 180, 90]
+        assert 89.44 <= n_min_lat <= 89.46
+
+        south = emitted(make, Circle(-89.9, -45, 50000))
+        assert len(south) == 1
+        s_min_lon, s_min_lat, s_max_lon, s_max_lat = parse(south[0])
+        assert [s_min_lon, s_max_lon, s_min_lat] == [-180, 180, -90]
+        assert -89.46 <= s_max_lat <= -89.44
+
+
+class TestAntimeridian:
+    def test_splits_a_crossing_bbox_into_two_get_tiles_calls(self, make: Make) -> None:
+        assert emitted(make, Bbox(170, 10, -170, 20)) == ["170.00,10.00,180.00,20.00", "-180.00,10.00,-170.00,20.00"]
+
+    def test_splits_a_circle_that_wraps_past_180(self, make: Make) -> None:
+        assert emitted(make, Circle(0, 179.5, 111194.927)) == ["178.50,-1.00,180.00,1.00", "-180.00,-1.00,-179.50,1.00"]
+
+    def test_splits_a_circle_that_wraps_past_minus_180(self, make: Make) -> None:
+        assert emitted(make, Circle(0, -179.5, 111194.927)) == [
+            "179.50,-1.00,180.00,1.00",
+            "-180.00,-1.00,-178.50,1.00",
+        ]
+
+    def test_issues_a_single_call_for_a_non_crossing_bbox(self, make: Make) -> None:
+        assert len(emitted(make, Bbox(-10, 10, 10, 20))) == 1
+
+    def test_snaps_each_half_independently(self, make: Make) -> None:
+        assert emitted(make, Bbox(170.123, 10.123, -170.123, 20.123)) == [
+            "170.12,10.12,180.00,20.13",
+            "-180.00,10.12,-170.12,20.13",
+        ]
+
+    def test_merges_results_from_both_halves(self, make: Make) -> None:
+        west = "https://tiles.example/west.json"
+        east = "https://tiles.example/east.json"
+        fake = FakeServer(
+            tilesets=[
+                overture(
+                    [
+                        FakeTile(west, [record(place("w", "West", [point(15, 175)]))]),
+                        FakeTile(east, [record(place("e", "East", [point(15, -175)]))]),
+                    ]
+                )
+            ],
+            tiles_for=lambda bbox: [west] if bbox.startswith("170") else [east],
+        )
+        result = make(fake).search_places(Bbox(170, 10, -170, 20))
+        assert sorted(str(h.origin) for h in result.places) == [place_origin("e"), place_origin("w")]
+        assert result.complete is True
+
+
+class TestInvalidRegions:
+    @pytest.mark.parametrize(
+        "region",
+        [
+            pytest.param(Circle(math.nan, 0, 10), id="NaN lat"),
+            pytest.param(Circle(0, math.nan, 10), id="NaN lon"),
+            pytest.param(Circle(0, math.inf, 10), id="Infinity lon"),
+            pytest.param(Circle(0, 0, math.nan), id="NaN radius"),
+            pytest.param(Circle(0, 0, math.inf), id="Infinity radius"),
+            pytest.param(Circle(0, 0, -1), id="negative radius"),
+            pytest.param(Circle(90.01, 0, 10), id="lat above 90"),
+            pytest.param(Circle(-91, 0, 10), id="lat below -90"),
+            pytest.param(Circle(0, 180.5, 10), id="lon above 180"),
+            pytest.param(Circle(0, -181, 10), id="lon below -180"),
+            pytest.param(Bbox(0, 0, math.nan, 1), id="bbox NaN"),
+            pytest.param(Bbox(0, 0, 1, math.inf), id="bbox Infinity"),
+            pytest.param(Bbox(-math.inf, 0, 1, 1), id="bbox -Infinity"),
+            pytest.param(Bbox(0, 10, 1, 5), id="bbox minLat > maxLat"),
+            pytest.param(Bbox(0, 0, 1, 91), id="bbox lat above 90"),
+            pytest.param(Bbox(0, -91, 1, 0), id="bbox lat below -90"),
+            pytest.param(Bbox(0, 0, 181, 1), id="bbox lon above 180"),
+            pytest.param(Bbox(-181, 0, 1, 1), id="bbox lon below -180"),
+        ],
+    )
+    def test_raises_value_error_before_any_request(self, make: Make, region: Region) -> None:
+        fake = FakeServer()
+        with pytest.raises(ValueError, match="invalid"):
+            make(fake).search_places(region)
+        assert fake.requests == []
+
+    def test_accepts_min_lon_greater_than_max_lon(self, make: Make) -> None:
+        assert make(FakeServer()).search_places(Bbox(170, 0, -170, 1)) is not None
+
+    def test_raises_value_error_before_any_request_for_similarity_sort_without_text(self, make: Make) -> None:
+        fake = FakeServer()
+        with pytest.raises(ValueError, match="similarity"):
+            make(fake).search_places(Bbox(0, 0, 1, 1), sort="similarity")
+        assert fake.requests == []
+
+    # Python-specific: the argument checks the reference's types make unnecessary.
+    def test_raises_value_error_before_any_request_for_an_unknown_sort(self, make: Make) -> None:
+        fake = FakeServer()
+        with pytest.raises(ValueError, match="unknown sort"):
+            make(fake).search_places(Bbox(0, 0, 1, 1), sort="nearest")
+        assert fake.requests == []
+
+    def test_raises_type_error_before_any_request_for_a_region_of_the_wrong_type(self, make: Make) -> None:
+        fake = FakeServer()
+        with pytest.raises(TypeError, match="Circle or a Bbox"):
+            make(fake).search_places((0, 0, 1, 1))
+        assert fake.requests == []
+
+    def test_checks_the_region_before_the_sort(self, make: Make) -> None:
+        with pytest.raises(ValueError, match="invalid"):
+            make(FakeServer()).search_places(Circle(math.nan, 0, 1), sort="nearest")
+        with pytest.raises(ValueError, match="unknown sort"):
+            make(FakeServer()).search_places(Circle(0, 0, 1), sort="nearest", text=None)

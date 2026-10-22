@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import pytest
 
+from atgeo import Circle, Region
 from atgeo._rank import rank, round3
 from atgeo._wire import TileRecord
 from atgeo.types import Bbox, SortMode
 
-from .helpers import place, place_origin, point
+from .conftest import Make
+from .fake_server import FakeServer, FakeTile, overture
+from .helpers import fixture, place, place_origin, point, record
+
+SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
 
 REGION = Bbox(-1, -1, 1, 1)
 
@@ -60,3 +66,28 @@ class TestSortKeys:
     def test_negates_huge_importances_without_overflow(self) -> None:
         recs = [TileRecord(place(i, "Same", [point(0, 0)]), importance=imp) for i, imp in (("a", -1), ("b", 2**62))]
         assert [h.importance for h in rank(recs, REGION, "", SortMode.FUSED)] == [2**62, -1]
+
+
+def scenario_region(r: dict[str, Any]) -> Region:
+    if "bbox" in r:
+        return Bbox(*r["bbox"])
+    return Circle(r["lat"], r["lon"], r["radius"])
+
+
+class TestRankingScenarios:
+    @pytest.mark.parametrize("s", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
+    def test_scenario(self, make: Make, s: dict[str, Any]) -> None:
+        records = [record(r["value"], r["importance"]) for r in s["records"]]
+        fake = FakeServer(tilesets=[overture([FakeTile("https://places.atgeo.org/tiles/t0.json", records)])])
+        kwargs: dict[str, Any] = {"text": s.get("text")}
+        if "sort" in s:
+            kwargs["sort"] = s["sort"]
+        places = make(fake).search_places(scenario_region(s["region"]), **kwargs).places
+        origins = [p.origin for p in places]
+        for top in s["expect"]["top"]:
+            for origin in top["origins"]:
+                assert origin in origins[: top["k"]], (top["k"], origin, origins)
+        for origin in s["expect"].get("absent", []):
+            assert origin not in origins
+        if not s["expect"]["top"]:
+            assert origins == []

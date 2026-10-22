@@ -1,0 +1,203 @@
+"""AtgeoClient: the blocking driver (Python spec §5)."""
+
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable, Sequence
+from typing import Generic, Self, TypeVar
+
+from ._engine import (
+    DEFAULT_CACHE_BUDGET_BYTES,
+    DEFAULT_SERVER,
+    MAX_TILES_IN_FLIGHT,
+    Engine,
+    Tile,
+    TileListRequest,
+    is_tile_failure,
+)
+from ._threads import start_daemon
+from ._wire import TileList
+from .transport import Transport
+from .types import (
+    PlaceRecord,
+    Region,
+    SearchResult,
+    ServiceDescription,
+    SortMode,
+    Tileset,
+)
+
+_I = TypeVar("_I")
+_O = TypeVar("_O")
+_WAIT = 0.1  # the caller waits in slices this long, so that KeyboardInterrupt reaches it promptly
+
+
+class _Pool(Generic[_I, _O]):
+    """``min(limit, n)`` daemon threads claiming items in order; the reference's mapLimit.
+
+    Not ThreadPoolExecutor: its threads are joined at interpreter exit, so after a Ctrl-C the process
+    would wait for every request in flight.
+    """
+
+    def __init__(self, items: Sequence[_I], fn: Callable[[_I], _O], limit: int, *, fail_fast: bool) -> None:
+        self._items = items
+        self._fn = fn
+        self._fail_fast = fail_fast
+        self._cond = threading.Condition()
+        self._next = 0
+        self._stop = False
+        self._error: BaseException | None = None
+        self.results: list[tuple[bool, _O | BaseException] | None] = [None] * len(items)
+        self._alive = min(limit, len(items))
+        for i in range(self._alive):
+            start_daemon(self._work, f"atgeo-{i}")
+
+    def _work(self) -> None:
+        try:
+            while True:
+                with self._cond:
+                    if self._stop or self._next >= len(self._items):
+                        return
+                    i = self._next
+                    self._next += 1
+                try:
+                    result: tuple[bool, _O | BaseException] = (True, self._fn(self._items[i]))
+                except BaseException as e:
+                    result = (False, e)
+                with self._cond:
+                    self.results[i] = result
+                    if not result[0] and self._error is None:
+                        self._error = result[1]  # type: ignore[assignment]
+                        if self._fail_fast:
+                            self._stop = True
+                    self._cond.notify_all()
+        finally:
+            with self._cond:
+                self._alive -= 1
+                self._cond.notify_all()
+
+    def wait(self) -> None:
+        """Until every worker has finished, or with fail_fast the first failure, which is raised."""
+        try:
+            with self._cond:
+                while self._alive:
+                    if self._fail_fast and self._error is not None:
+                        break
+                    self._cond.wait(_WAIT)
+                error = self._error
+            if self._fail_fast and error is not None:
+                raise error
+        except BaseException:
+            with self._cond:
+                self._stop = True  # no worker claims another item; requests in flight finish on their own
+            raise
+
+
+class AtgeoClient:
+    """A blocking client for the atgeo gazetteer. Safe to share between threads; make one per server.
+
+    Use it in a ``with`` block, or call ``close()`` when done: the default transport pools connections.
+    """
+
+    DEFAULT_SERVER = DEFAULT_SERVER
+    DEFAULT_CACHE_BUDGET_BYTES = DEFAULT_CACHE_BUDGET_BYTES
+
+    def __init__(
+        self,
+        server: str = DEFAULT_SERVER,
+        *,
+        transport: Transport | None = None,
+        cache_budget_bytes: int = DEFAULT_CACHE_BUDGET_BYTES,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._engine = Engine(server, cache_budget_bytes, clock)
+        self._owns_transport = transport is None
+        if transport is None:
+            from ._urllib3 import Urllib3Transport  # noqa: PLC0415
+
+            transport = Urllib3Transport()
+        self._transport = transport
+
+    def search_places(
+        self,
+        region: Region,
+        *,
+        text: str | None = None,
+        dataset: str | None = None,
+        collection: str | None = None,
+        sort: SortMode | str = SortMode.FUSED,
+    ) -> SearchResult:
+        """Search a region; the text, and the precise region, never leave the device (README, Privacy)."""
+        engine = self._engine
+        plan = engine.plan(region, text, dataset, collection, sort)
+
+        lists: list[TileList | None] = [engine.cached_tile_list(r.key) for r in plan.lists]
+        missing = [r for r, cached in zip(plan.lists, lists, strict=True) if cached is None]
+        if missing:
+
+            def fetch_list(r: TileListRequest) -> TileList:
+                return engine.store_tile_list(r.key, self._transport.get(r.url))
+
+            pool: _Pool[TileListRequest, TileList] = _Pool(missing, fetch_list, len(missing), fail_fast=True)
+            pool.wait()  # raises the first failure as soon as it is known
+            fetched = iter(pool.results)
+            lists = [cached if cached is not None else _value(next(fetched)) for cached in lists]
+        ready = [tile_list for tile_list in lists if tile_list is not None]
+
+        urls = engine.tile_urls(ready)
+        tiles: _Pool[str, Tile] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=False)
+        tiles.wait()
+        loaded: list[Tile | None] = []
+        for result in tiles.results:
+            assert result is not None
+            ok, value = result
+            if ok:
+                loaded.append(value)  # type: ignore[arg-type]
+            elif is_tile_failure(value):  # type: ignore[arg-type]
+                loaded.append(None)
+            else:
+                raise value  # type: ignore[misc]  # MemoryError fails the search
+        return engine.assemble(plan, urls, loaded, any(tile_list.overview for tile_list in ready))
+
+    def _tile(self, url: str) -> Tile:
+        engine = self._engine
+        entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
+        if entry is not None:
+            return engine.parsed(url, entry)
+        return engine.store_tile(url, self._transport.get(engine.tile_request(url)))
+
+    def get_place(self, origin: str) -> PlaceRecord:
+        """A place by origin (or, for a record with none, by its tile record's uri)."""
+        cached = self._engine.cached_place(origin)
+        if cached is not None:
+            return cached
+        return self._engine.read_place(origin, self._transport.get(self._engine.place_url(origin)))
+
+    def describe_service(self) -> ServiceDescription:
+        """The server's DID and tilesets; cached for an hour."""
+        cached = self._engine.cached_service()
+        if cached is not None:
+            return cached
+        return self._engine.store_service(self._transport.get(self._engine.service_url()))
+
+    def describe_tileset(self, slug: str) -> Tileset:
+        """A tileset's descriptor; not cached."""
+        return self._engine.read_tileset(self._transport.get(self._engine.tileset_url(slug)))
+
+    def close(self) -> None:
+        """Close the transport, if the client made it."""
+        if self._owns_transport:
+            self._transport.close()  # type: ignore[attr-defined]
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _value(result: tuple[bool, _O | BaseException] | None) -> _O:
+    assert result is not None
+    assert result[0]
+    return result[1]  # type: ignore[return-value]

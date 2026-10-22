@@ -57,3 +57,14 @@ def record(value: dict[str, Any], importance: Any = None, uri: str | None = None
     if uri is not None:
         r["uri"] = uri
     return r
+
+
+def tile_url(n: str) -> str:
+    return f"https://tiles.example/{n}.json"
+
+
+def xrpc(nsid: str, params: list[tuple[str, str]], server: str = "https://places.atgeo.org") -> str:
+    """The URL the clients send for an XRPC call, for the fake's raw-response override."""
+    import urllib.parse  # noqa: PLC0415
+
+    return f"{server}/xrpc/{nsid}?{urllib.parse.urlencode(params)}"
