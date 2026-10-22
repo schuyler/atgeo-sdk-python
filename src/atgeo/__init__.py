@@ -32,10 +32,11 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from ._aiohttp import AiohttpTransport
+    from ._aiohttp import AiohttpTransport as AiohttpTransport  # an explicit re-export, kept out of __all__
 
+# AiohttpTransport is left out: a star import resolves every name listed here, and that one needs the
+# async extra. `from atgeo import AiohttpTransport` still works, through __getattr__ below.
 __all__ = [
-    "AiohttpTransport",
     "AsyncAtgeoClient",
     "AsyncTransport",
     "AtgeoClient",

@@ -93,6 +93,25 @@ def test_names_the_extra_when_aiohttp_is_missing() -> None:
     assert "atgeo[async]" in lines[1]
 
 
+def test_star_imports_without_aiohttp() -> None:
+    # A star import resolves every name in __all__, so a name that needs the extra must not be listed.
+    done = run_blocked(
+        """
+        from atgeo import *
+        assert "aiohttp" not in sys.modules
+        print(AtgeoClient.__name__, AsyncAtgeoClient.__name__)
+        """
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["AtgeoClient", "AsyncAtgeoClient"]
+
+
+def test_imports_aiohttp_transport_by_name_with_the_extra() -> None:
+    from atgeo import AiohttpTransport  # noqa: PLC0415
+
+    assert AiohttpTransport.__name__ == "AiohttpTransport"
+
+
 def test_does_not_import_aiohttp_on_import_atgeo() -> None:
     done = subprocess.run(
         [sys.executable, "-c", "import sys, atgeo; print('aiohttp' in sys.modules)"],
