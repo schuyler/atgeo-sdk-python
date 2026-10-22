@@ -3,6 +3,7 @@ test_imports.py's job here."""
 
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 from typing import Any, ClassVar
 
@@ -361,6 +362,20 @@ class TestConstruction:
         with pytest.raises(ValueError, match="absolute http or https URL"):
             make(FakeServer(), server=server)
 
+    @pytest.mark.parametrize("budget", [None, "52428800", 1.5, True])
+    def test_refuses_a_cache_budget_that_is_not_an_int(self, make: Make, budget: object) -> None:
+        # Unchecked, it failed inside every tile store: each tile counted as failed, and no search raised.
+        with pytest.raises(TypeError, match="cache_budget_bytes"):
+            make(FakeServer(), cache_budget_bytes=budget)
+
+    def test_refuses_a_negative_cache_budget(self, make: Make) -> None:
+        with pytest.raises(ValueError, match="cache_budget_bytes"):
+            make(FakeServer(), cache_budget_bytes=-1)
+
+    def test_takes_a_zero_cache_budget(self, make: Make) -> None:
+        result = make(FakeServer(), cache_budget_bytes=0).search_places(REGION)
+        assert result.complete
+
     def test_strips_trailing_slashes_from_the_server(self, make: Make) -> None:
         fake = FakeServer(server="http://localhost:8000")
         make(fake, server="http://localhost:8000///").describe_service()
@@ -433,9 +448,53 @@ class TestResponsesParsedOffTheCallersThread:
         ]
 
 
+class TestClosing:
+    """No reference counterpart: a closed async client, or its transport, refuses every call."""
+
+    def test_refuses_every_call_after_aclose_with_the_default_transport(self) -> None:
+
+        from atgeo import AsyncAtgeoClient  # noqa: PLC0415
+
+        async def main() -> None:
+            client = AsyncAtgeoClient("http://127.0.0.1:9")
+            await client.aclose()
+            await client.aclose()  # closing twice is harmless
+            for call in (
+                lambda: client.search_places(REGION),
+                lambda: client.get_place("urn:x"),
+                client.describe_service,
+                lambda: client.describe_tileset("s"),
+            ):
+                with pytest.raises(RuntimeError, match="is closed"):
+                    await call()
+            # The transport made no session that nobody would close.
+            assert client._transport._session is None  # type: ignore[attr-defined]
+
+        asyncio.run(main())
+
+    def test_a_closed_aiohttp_transport_refuses_requests(self) -> None:
+
+        from atgeo import AiohttpTransport  # noqa: PLC0415
+
+        async def main() -> None:
+            transport = AiohttpTransport()
+            await transport.aclose()
+            with pytest.raises(RuntimeError, match="is closed"):
+                await transport.get("http://127.0.0.1:9/")
+
+        asyncio.run(main())
+
+    def test_leaves_a_client_with_its_own_transport_usable_after_aclose(self, make: Make) -> None:
+        client = make(FakeServer())
+        if client.kind == "sync":
+            client.inner.close()  # type: ignore[union-attr]
+        else:
+            asyncio.run(client.inner.aclose())  # type: ignore[union-attr]
+        assert client.search_places(REGION).complete
+
+
 class TestEventLoopAffinity:
     def test_refuses_a_second_event_loop_before_any_request_with_the_default_transport(self) -> None:
-        import asyncio  # noqa: PLC0415
 
         from atgeo import AsyncAtgeoClient  # noqa: PLC0415
 

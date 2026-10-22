@@ -40,8 +40,12 @@ class AiohttpTransport:
         self._proxies = Proxies()
         self._session: aiohttp.ClientSession | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closed = False
 
     def _session_for_running_loop(self) -> aiohttp.ClientSession:
+        # Closed is final: a new session made after aclose() would never be closed.
+        if self._closed:
+            raise RuntimeError("this AiohttpTransport is closed")
         loop = asyncio.get_running_loop()
         if self._session is None:
             self._loop = loop
@@ -104,5 +108,7 @@ class AiohttpTransport:
             raise BodyError(f"bad body: {e!r}") from e
 
     async def aclose(self) -> None:
+        """Close the session. The transport refuses every request after this."""
+        self._closed = True
         if self._session is not None:
             await self._session.close()
