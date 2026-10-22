@@ -7,6 +7,7 @@ them). The ported tests keep their names and their remaining assertions.
 
 from __future__ import annotations
 
+import logging
 import urllib.parse
 
 import pytest
@@ -92,3 +93,30 @@ class TestGetPlaceSendsOnlyTheOrigin:
         parts = urllib.parse.urlsplit(url)
         assert parts.path == "/xrpc/org.atgeo.getPlace"
         assert urllib.parse.parse_qsl(parts.query) == [("uri", origin)]
+
+
+class TestFailedTileLogs:
+    """Contract §12 and §14: a failed tile is logged at DEBUG, with its entry's fields and nothing else."""
+
+    def test_logs_a_failed_tile_at_debug_without_the_text_or_the_region(
+        self, make: Make, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = setup(make)
+        client.fake.fail_tiles.add(TILE)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        result = client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka")
+        assert len(result.tile_failures) == 1
+        [entry] = [r for r in caplog.records if r.name == "atgeo"]
+        assert entry.levelno == logging.DEBUG
+        assert TILE in entry.getMessage()
+        assert "(status, status 500)" in entry.getMessage()
+        needles = ["zanzibar", "quokka", "37.7749295", "122.4194155", "7749295", "4194155", "123.456789", "37.77,"]
+        for r in caplog.records:
+            text = r.getMessage().lower()
+            for needle in needles:
+                assert needle not in text
+
+    def test_logs_nothing_for_a_complete_search(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        setup(make).search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        assert [r for r in caplog.records if r.name.startswith("atgeo")] == []

@@ -13,13 +13,13 @@ from ._engine import (
     DEFAULT_SERVER,
     MAX_TILES_IN_FLIGHT,
     Engine,
-    Tile,
+    Outcome,
     TileListRequest,
 )
 from ._threads import start_daemon
 from ._wire import TileList
 from .transport import AsyncTransport
-from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, Tileset
+from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, TileFailure, Tileset
 
 _T = TypeVar("_T")
 
@@ -133,7 +133,7 @@ class AsyncAtgeoClient:
         ready = [tile_list for tile_list in lists if tile_list is not None]
 
         urls = engine.tile_urls(ready)
-        tiles: list[Tile | None] = [None] * len(urls)
+        outcomes: list[Outcome | None] = [None] * len(urls)
         claimed = 0
 
         async def worker() -> None:
@@ -141,12 +141,7 @@ class AsyncAtgeoClient:
             while claimed < len(urls):
                 i = claimed
                 claimed += 1
-                try:
-                    tiles[i] = await self._tile(urls[i])
-                except MemoryError:
-                    raise
-                except Exception:  # a failed tile; CancelledError is a BaseException and passes
-                    tiles[i] = None
+                outcomes[i] = await self._tile(urls[i])  # anything it raises fails the search
 
         try:
             async with asyncio.TaskGroup() as group:
@@ -155,18 +150,29 @@ class AsyncAtgeoClient:
         except BaseExceptionGroup as eg:
             raise _first(eg)  # noqa: B904
         overview = any(tile_list.overview for tile_list in ready)
-        return await _in_thread(lambda: engine.assemble(plan, urls, tiles, overview))
+        done = [outcome for outcome in outcomes if outcome is not None]
+        assert len(done) == len(urls)
+        return await _in_thread(lambda: engine.assemble(plan, urls, done, overview))
 
-    async def _tile(self, url: str) -> Tile:
+    async def _tile(self, url: str) -> Outcome:
+        """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
             records = engine.memo(url, entry)
             if records is not None:
                 return entry, records
-            return await _in_thread(lambda: (entry, entry.records()))
-        response = await self._transport.get(engine.tile_request(url))
-        return await _in_thread(lambda: engine.store_tile(url, response))
+            return await _in_thread(lambda: engine.reparse(url, entry))
+        request = engine.tile_request(url)
+        if isinstance(request, TileFailure):
+            return request
+        try:
+            response = await self._transport.get(request)
+        except MemoryError:
+            raise
+        except Exception as e:  # whatever the transport raises; CancelledError is a BaseException and passes
+            return engine.transport_failure(url, e)
+        return await _in_thread(lambda: engine.load_tile(url, response))
 
     async def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""

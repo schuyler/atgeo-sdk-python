@@ -102,12 +102,41 @@ class SearchHit:
         return _location(self.place)
 
 
+class TileFailureKind(StrEnum):
+    """Why a tile failed (contract §4.4)."""
+
+    REFUSED = "refused"  # not an absolute http or https URL, or it carries credentials; no request was made
+    STATUS = "status"  # a non-2xx
+    DECODE = "decode"  # a 2xx whose body is not a usable tile payload
+    TRANSPORT = "transport"  # the transport raised: a network error, a timeout, a body over its cap, anything
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TileFailure:
+    """One tile a search skipped.
+
+    ``url`` is the tile URL as the tile list gave it, and ``status`` the HTTP status for ``STATUS``, else None.
+    ``error`` is what went wrong, with its traceback: an :class:`AtgeoError` for ``STATUS``, whatever the
+    parser raised for ``DECODE``, the transport's own exception for ``TRANSPORT``, a ``ValueError`` for
+    ``REFUSED``. It is left out of ``==`` and ``hash``, since its type and message are Python's own.
+    """
+
+    url: str
+    kind: TileFailureKind
+    status: int | None
+    error: Exception = field(compare=False)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchResult:
+    """A search's places. ``complete`` is False when any tile failed; ``tile_failures`` lists each, in tile URL
+    order, and ``tiles.failed`` is its length."""
+
     places: list[SearchHit]
     complete: bool
     overview: bool
     tiles: TileCounts
+    tile_failures: tuple[TileFailure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

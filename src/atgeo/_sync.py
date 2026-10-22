@@ -12,9 +12,8 @@ from ._engine import (
     DEFAULT_SERVER,
     MAX_TILES_IN_FLIGHT,
     Engine,
-    Tile,
+    Outcome,
     TileListRequest,
-    is_tile_failure,
 )
 from ._threads import start_daemon
 from ._wire import TileList
@@ -25,6 +24,7 @@ from .types import (
     SearchResult,
     ServiceDescription,
     SortMode,
+    TileFailure,
     Tileset,
 )
 
@@ -158,26 +158,35 @@ class AtgeoClient:
         ready = [tile_list for tile_list in lists if tile_list is not None]
 
         urls = engine.tile_urls(ready)
-        tiles: _Pool[str, Tile] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=False)
+        tiles: _Pool[str, Outcome] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=False)
         tiles.wait()
-        loaded: list[Tile | None] = []
+        # A failed tile is an outcome, not an exception: anything a worker raised fails the search.
+        outcomes: list[Outcome] = []
         for result in tiles.results:
             assert result is not None
             ok, value = result
-            if ok:
-                loaded.append(value)  # type: ignore[arg-type]
-            elif is_tile_failure(value):  # type: ignore[arg-type]
-                loaded.append(None)
-            else:
-                raise value  # type: ignore[misc]  # MemoryError fails the search
-        return engine.assemble(plan, urls, loaded, any(tile_list.overview for tile_list in ready))
+            if not ok:
+                raise value  # type: ignore[misc]
+            outcomes.append(value)  # type: ignore[arg-type]
+        return engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready))
 
-    def _tile(self, url: str) -> Tile:
+    def _tile(self, url: str) -> Outcome:
+        """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
-            return engine.parsed(url, entry)
-        return engine.store_tile(url, self._transport.get(engine.tile_request(url)))
+            records = engine.memo(url, entry)
+            return (entry, records) if records is not None else engine.reparse(url, entry)
+        request = engine.tile_request(url)
+        if isinstance(request, TileFailure):
+            return request
+        try:
+            response = self._transport.get(request)
+        except MemoryError:
+            raise
+        except Exception as e:  # whatever the transport raises; KeyboardInterrupt is a BaseException and passes
+            return engine.transport_failure(url, e)
+        return engine.load_tile(url, response)
 
     def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""

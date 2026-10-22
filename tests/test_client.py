@@ -372,7 +372,8 @@ class TestConstruction:
 
     @pytest.mark.parametrize("budget", [None, "52428800", 1.5, True])
     def test_refuses_a_cache_budget_that_is_not_an_int(self, make: Make, budget: object) -> None:
-        # Unchecked, it failed inside every tile store: each tile counted as failed, and no search raised.
+        # Unchecked, it failed inside every tile store: once each tile counted as failed and every search came
+        # back empty; now every search would fail with an error from deep in the cache.
         with pytest.raises(TypeError, match="cache_budget_bytes"):
             make(FakeServer(), cache_budget_bytes=budget)
 

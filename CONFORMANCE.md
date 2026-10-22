@@ -26,7 +26,7 @@ Bodies are decoded the way `JSON.parse(await response.text())` would: a leading 
 - A JSON `-0` integer becomes `0`, where JavaScript keeps negative zero. Nothing the client compares can tell them apart.
 - A body that starts with two byte-order marks fails here; Node 22's `Response.text()` drops both.
 
-In a tile, any of these makes the tile fail; in an XRPC answer, the call raises `AtgeoDecodingError`.
+In a tile, any of these makes the tile fail, with kind `decode`; in an XRPC answer, the call raises `AtgeoDecodingError`.
 
 ## Snapping a circle (contract §3)
 
@@ -34,15 +34,19 @@ The circle's enclosing box is computed with the reference's floating-point expre
 
 ## Content encodings
 
-The default transports ask for gzip and accept only gzip or no encoding. A body in an encoding they did not ask for (`br`, `deflate`, `zstd`) fails, as a failed tile or a `BodyError`; the reference's `fetch` would decode it.
+The default transports ask for gzip and accept only gzip or no encoding. A body in an encoding they did not ask for (`br`, `deflate`, `zstd`) fails, as a failed tile of kind `transport` or a `BodyError`; the reference's `fetch` would decode it.
 
 ## URLs
 
 Every URL is prepared before a transport sees it: leading and trailing spaces and control characters are trimmed, tab, LF and CR are dropped, and space, other control characters and non-ASCII are percent-encoded as UTF-8, which is what the reference's WHATWG URL parsing does to those characters. The other WHATWG rules are not reproduced: a backslash is not read as `/`, `.` and `..` path segments are not resolved, and a non-ASCII host is percent-encoded rather than turned into punycode (`bücher.example` is `b%C3%BCcher.example` here and `xn--bcher-kva.example` there), so a tile on such a host fails. urllib3 sends a lowercase escape uppercased (`%2c` as `%2C`), which decodes the same.
 
-A tile URL that is not an absolute `http` or `https` URL, or that has credentials in it, is a failed tile, as it is under Node's `fetch`, whose `Request` refuses credentials. A redirect to any other scheme or to a URL with credentials is a `RedirectError`, and so is an eleventh redirect.
+A tile URL that is not an absolute `http` or `https` URL, or that has credentials in it, is a failed tile of kind `refused`, as it is under Node's `fetch`, whose `Request` refuses credentials. A redirect to any other scheme or to a URL with credentials is a `RedirectError`, and so is an eleventh redirect.
 
 A query value holding a lone surrogate (from a Python string; JSON can carry one) is sent with U+FFFD in its place, as `URLSearchParams` sends it.
+
+## Failed tiles (contract §4.4)
+
+The reference counts failed tiles but does not say which; this port lists each in `tile_failures`. The reference's tile loop also catches every error, its own cache insert's included, so a bug there passes for a run of bad tiles; here an error after a tile has decoded fails the search, as the contract asks. A payload with no `records` list fails its tile in both, here through a check rather than the `TypeError` the reference's `.map` throws.
 
 ## Ordering a NaN distance (contract §8)
 

@@ -28,6 +28,8 @@ from .types import (
     ServiceDescription,
     SortMode,
     TileCounts,
+    TileFailure,
+    TileFailureKind,
     Tileset,
 )
 
@@ -63,6 +65,8 @@ __all__ = [
     "ServiceDescription",
     "SortMode",
     "TileCounts",
+    "TileFailure",
+    "TileFailureKind",
     "Tileset",
     "Transport",
     "Urllib3Transport",

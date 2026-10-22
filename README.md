@@ -16,7 +16,7 @@ with AtgeoClient() as atgeo:
         print(hit.name, round(hit.distance), f"{hit.score:.2f}", hit.origin)
 ```
 
-Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. If `result.complete` is `False`, some tiles failed to load and the results are partial. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
 
 The async version is the same with `await`:
 
@@ -104,6 +104,15 @@ class SearchResult:
     complete: bool  # False if any tile failed to load
     overview: bool  # True if the server answered with its coarse overview
     tiles: TileCounts  # fetched and failed
+    tile_failures: tuple[TileFailure, ...]  # each failed tile, in tile URL order; () when complete
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TileFailure:
+    url: str  # the tile URL as the server's tile list gave it
+    kind: TileFailureKind  # REFUSED, STATUS, DECODE or TRANSPORT
+    status: int | None  # the HTTP status for STATUS, else None
+    error: Exception  # what was raised, traceback and all; not part of ==
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -144,7 +153,9 @@ A tileset's collections, attribution and extent. Not cached. The describe types 
 
 - `AtgeoError` has the server's error `code` (`PlaceNotFound`, `BboxTooLarge`, `DatasetNotFound` and so on), or `HttpError` when the server didn't send one, a `message`, and the HTTP `status`. Use `status` to tell a request the server refused (4xx) from one it failed to answer (5xx); codes are an open list and new ones may appear.
 - `search_places` raises `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text, and `TypeError` for a region that isn't a `Circle` or a `Bbox`, before any request.
-- A failed `getTiles` fails the search. A failed tile does not: it's skipped, counted in `tiles.failed`, and `complete` is `False`.
+- A failed `getTiles` fails the search. A failed tile does not: it's skipped, listed in `tile_failures` and counted in `tiles.failed`, and `complete` is `False`. A tile's `kind` says where it went wrong: `REFUSED` is a tile URL that isn't absolute `http` or `https` or has credentials in it, and no request was made; `STATUS` a non-2xx, with its `status` and the `AtgeoError`; `DECODE` a 2xx whose body isn't a tile, with whatever the parser raised; `TRANSPORT` anything the transport raised, a timeout, a dropped connection, a body over the cap, or a bug in a transport of your own, which is why that one is a failed tile and not an exception. The kind, URL and status are the same in every atgeo SDK; `error` is Python's own, so two results compare equal without it.
+- An error in the client's own work after a tile has decoded, such as storing it in the cache, fails the search rather than passing for a bad tile. So does `MemoryError`, wherever it comes from.
+- Each failed tile is also logged on the `atgeo` logger at `DEBUG`, with its URL, kind, status and error and nothing else, never your search text or region. The library adds no handler, as libraries shouldn't, so you see nothing until you ask: `logging.getLogger("atgeo").setLevel(logging.DEBUG)` with a handler configured, or `logging.basicConfig(level=logging.DEBUG)`. It never logs above `DEBUG`, so a search on every keystroke over a bad connection won't fill your logs, and it sends nothing anywhere.
 - A 2xx body that isn't JSON, or has nothing usable in it, raises `AtgeoDecodingError`, with the parser's error as its `__cause__`. It isn't a `ValueError`, so an `except ValueError` meant for a bad region won't swallow it. Retrying rarely helps; the server sends the same body again.
 - When no answer arrives at all, you get whatever the transport raised. Catch `(urllib3.exceptions.HTTPError, OSError)` with `Urllib3Transport` and `(aiohttp.ClientError, OSError)` with `AiohttpTransport`. Before a response, that's the library's own exception, or `TimeoutError` when `total_timeout` runs out (urllib3's `MaxRetryError`, with the real cause in `.reason`, isn't an `OSError`); after one starts, a body that doesn't arrive whole is `atgeo.BodyError`, and a bad or endless redirect is `atgeo.RedirectError`, both `OSError`s. With the httpx adapter, add `httpx.HTTPError`.
 - `AsyncAtgeoClient` with its default transport raises `RuntimeError` when called from an event loop other than its first call's, before making any request.

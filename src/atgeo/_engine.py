@@ -4,10 +4,16 @@ The engine owns the caches, behind one lock that is never held across a request 
 and plans a search, turns responses into tile lists, tiles, places and descriptions, and assembles the
 result. The drivers (_sync.py, _async.py) supply the requests and the concurrency, and call these methods
 in the same order, so the two clients cannot drift apart.
+
+A tile's outcome is a Tile or a TileFailure, and which errors make a failure is fixed by where they arise
+(contract §4.4): the URL check (tile_request), the transport call (in the drivers), the status check and
+decoding (load_tile, reparse). The cache insert after decoding is the client's own work and is not guarded,
+so an error there fails the search. MemoryError fails the search wherever it arises.
 """
 
 from __future__ import annotations
 
+import logging
 import operator
 import threading
 import urllib.parse
@@ -34,7 +40,17 @@ from ._wire import (
     record_keys,
 )
 from .transport import HttpResponse
-from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, TileCounts, Tileset
+from .types import (
+    PlaceRecord,
+    Region,
+    SearchResult,
+    ServiceDescription,
+    SortMode,
+    TileCounts,
+    TileFailure,
+    TileFailureKind,
+    Tileset,
+)
 
 DEFAULT_SERVER = "https://places.atgeo.org"
 DEFAULT_CACHE_BUDGET_BYTES = 50 * 1024 * 1024
@@ -44,6 +60,11 @@ MAX_TILES_IN_FLIGHT = 8
 
 # A used tile: the cache entry its records came from, and the records.
 Tile = tuple[TileEntry, list[TileRecord]]
+# What a tile came to: used, or failed.
+Outcome = Tile | TileFailure
+
+# The library convention: no handler of our own, so a record reaches the app's handlers, or at DEBUG nowhere.
+_log = logging.getLogger("atgeo")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,8 +97,8 @@ def _scalar_values(s: str) -> str:
 
 
 def check_budget(budget: int) -> int:
-    """A byte count. Checked here, since a wrong type would otherwise fail inside every tile store, where it
-    would count as a failed tile and every search would come back empty instead of raising."""
+    """A byte count. Checked here, since a wrong type would otherwise fail inside every tile store, failing
+    every search with an error from deep in the cache rather than one naming the argument."""
     if isinstance(budget, bool):
         raise TypeError("cache_budget_bytes must be an int, not bool")
     try:
@@ -174,27 +195,58 @@ class Engine:
         return entry, records if records is not None else entry.records()
 
     @staticmethod
-    def tile_request(url: str) -> str:
-        """The URL a tile is fetched from. A tile URL that is not absolute http(s) is a failed tile."""
+    def reparse(url: str, entry: TileEntry) -> Outcome:
+        """A cached tile parsed again, for a search (no lock held). It parsed once, so it cannot fail; if it
+        somehow does, the tile failed to decode."""
+        try:
+            return entry, entry.records()
+        except MemoryError:
+            raise
+        except Exception as e:
+            return TileFailure(url=url, kind=TileFailureKind.DECODE, status=None, error=e)
+
+    @staticmethod
+    def tile_request(url: str) -> str | TileFailure:
+        """The URL a tile is fetched from, or, for one that is not absolute http(s) or carries credentials,
+        a refused tile, with no request made."""
         if not is_http_url(url):
-            raise ValueError(f"tile URL {url!r} is not an absolute http or https URL")
+            error = ValueError(f"tile URL {url!r} is not an absolute http or https URL without credentials")
+            return TileFailure(url=url, kind=TileFailureKind.REFUSED, status=None, error=error)
         return prepare_url(url)
 
-    def store_tile(self, url: str, response: HttpResponse) -> Tile:
-        """Parse a fetched tile and cache it. Raises (a failed tile) for a non-2xx or an unusable body."""
+    @staticmethod
+    def transport_failure(url: str, error: Exception) -> TileFailure:
+        """A tile whose transport raised. The driver catches; MemoryError it lets through."""
+        return TileFailure(url=url, kind=TileFailureKind.TRANSPORT, status=None, error=error)
+
+    def load_tile(self, url: str, response: HttpResponse) -> Outcome:
+        """A fetched tile, decoded and cached, or the failure its status or body made it. Only the status
+        check and decoding are guarded: an error caching the tile fails the search."""
         if not 200 <= response.status < 300:
-            raise error_from(response.status, response.body)
-        records = read_tile_payload(parse_body(response.body))
+            error = error_from(response.status, response.body)
+            return TileFailure(url=url, kind=TileFailureKind.STATUS, status=response.status, error=error)
+        try:
+            records = read_tile_payload(parse_body(response.body))
+        except MemoryError:
+            raise
+        except Exception as e:  # whatever the parser raises: its input is the server's
+            return TileFailure(url=url, kind=TileFailureKind.DECODE, status=None, error=e)
         entry = TileEntry(response.body, record_keys(records))
         with self._lock:
             self._tiles.set(url, entry)
         return entry, records
 
     def assemble(
-        self, plan: SearchPlan, urls: Sequence[str], tiles: Sequence[Tile | None], overview: bool
+        self, plan: SearchPlan, urls: Sequence[str], outcomes: Sequence[Outcome], overview: bool
     ) -> SearchResult:
-        """§4.5 to §4.9 over the tiles that loaded; ``tiles[i]`` is None for a failed ``urls[i]``."""
-        used = {url: tile for url, tile in zip(urls, tiles, strict=True) if tile is not None}
+        """§4.5 to §4.9 over the tiles that loaded; ``outcomes[i]`` is what ``urls[i]`` came to."""
+        used: dict[str, Tile] = {}
+        failures: list[TileFailure] = []
+        for url, outcome in zip(urls, outcomes, strict=True):
+            if isinstance(outcome, TileFailure):
+                failures.append(outcome)
+            else:
+                used[url] = outcome
         with self._lock:
             self._parsed.replace(used)
         # Dedupe picks a winner before the region filter runs: if copies sharing an origin differ in location
@@ -204,12 +256,18 @@ class Engine:
             prefix = f"urn:atgeo:{plan.dataset}:{plan.collection}:"
             records = [r for r in records if type(o := r.value.get("origin")) is str and o.startswith(prefix)]
         records = [r for r in records if in_region(locate(r.value), plan.region)]
-        return SearchResult(
+        result = SearchResult(
             places=rank(records, plan.region, plan.query, plan.sort),
-            complete=len(used) == len(urls),
+            complete=not failures,
             overview=overview,
-            tiles=TileCounts(fetched=len(used), failed=len(urls) - len(used)),
+            tiles=TileCounts(fetched=len(used), failed=len(failures)),
+            tile_failures=tuple(failures),
         )
+        # Logged once the search has a result: a search that fails reports no failed tiles (contract §4.4).
+        # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).
+        for f in failures:
+            _log.debug("tile failed: %s (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
+        return result
 
     # getPlace, describeService, describeTileset.
 
@@ -250,12 +308,3 @@ class Engine:
 
     def read_tileset(self, response: HttpResponse) -> Tileset:
         return read_tileset(self.body_of(response))
-
-
-def is_tile_failure(e: BaseException) -> bool:
-    """Whether an exception from a tile fetch counts as a failed tile rather than failing the search.
-
-    Any Exception does, except MemoryError, which fails the search, as Kotlin's tile loop does not catch
-    Throwable. Cancellation (a BaseException) never reaches here.
-    """
-    return isinstance(e, Exception) and not isinstance(e, MemoryError)

@@ -1,13 +1,26 @@
-"""transport.test.ts, ported: failed tiles, typed errors, URL construction. The default transports
-themselves are test_transports.py's."""
+"""transport.test.ts, ported: failed tiles (each kind, with its URL and status, in URL order), typed errors,
+URL construction. The default transports themselves are test_transports.py's."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import urllib.parse
+from typing import Any
 
 import pytest
 
-from atgeo import AtgeoError, Bbox, TileCounts
+from atgeo import (
+    AsyncAtgeoClient,
+    AtgeoDecodingError,
+    AtgeoError,
+    Bbox,
+    TileCounts,
+    TileFailure,
+    TileFailureKind,
+    _engine,
+)
+from atgeo._cache import TileCache, TileEntry
 from atgeo.transport import HttpResponse
 
 from .conftest import Make
@@ -153,3 +166,194 @@ class TestXrpcUrls:
         assert fake.requests == [
             f"{DEFAULT_SERVER}/xrpc/org.atgeo.getPlace?uri=urn%3Ax%3Aa%2Cb%3Ac+d%26e%3Df%23g%2Bh%25i~j"
         ]
+
+
+def serving(tiles: dict[str, HttpResponse | None], **opts: Any) -> FakeServer:
+    """A fake whose tile list is ``tiles``' keys, in that order, each answered with its value; None falls
+    through to the fake's routing, which answers 404 for a URL it does not know."""
+    listing = HttpResponse(200, json.dumps({"tiles": list(tiles)}).encode())
+    responses = {url: r for url, r in tiles.items() if r is not None}
+    return FakeServer(
+        answer=lambda url: listing if "/xrpc/org.atgeo.getTiles?" in url else None, responses=responses, **opts
+    )
+
+
+GOOD = HttpResponse(200, json.dumps({"records": [record(place("a", "A", [point(37.772, -122.412)]))]}).encode())
+
+
+class TestTileFailures:
+    """Contract §4.4: each failed tile, with its kind, URL and status, in URL order."""
+
+    def test_reports_no_failures_for_a_complete_search(self, make: Make) -> None:
+        result = make(two_tiles()).search_places(REGION)
+        assert result.tile_failures == ()
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "tiles/a.json",
+            "ftp://tiles.example/a.json",
+            "file:///etc/hostname",
+            "https://user:pw@tiles.example/a.json",
+            "https://user@tiles.example/a.json",
+        ],
+    )
+    def test_reports_a_refused_url_without_a_request(self, make: Make, bad: str) -> None:
+        fake = serving({bad: None, tile_url("a"): GOOD})
+        result = make(fake).search_places(REGION)
+        assert result.tile_failures == (TileFailure(url=bad, kind=TileFailureKind.REFUSED, status=None, error=_ANY),)
+        assert isinstance(result.tile_failures[0].error, ValueError)
+        assert result.tiles == TileCounts(fetched=1, failed=1)
+        assert all(bad not in r for r in fake.requests)
+
+    @pytest.mark.parametrize("status", [404, 500, 503])
+    def test_reports_a_non_2xx_with_its_status(self, make: Make, status: int) -> None:
+        body = b'{"error": "Upstream", "message": "no"}'
+        result = make(serving({tile_url("a"): HttpResponse(status, body)})).search_places(REGION)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.STATUS, status)
+        assert isinstance(failure.error, AtgeoError)
+        assert (failure.error.code, failure.error.status) == ("Upstream", status)
+        assert failure.kind == "status"
+
+    @pytest.mark.parametrize(
+        ("body", "error"),
+        [
+            (b"<html>not json</html>", ValueError),
+            (b"[]", AtgeoDecodingError),
+            (b'"records"', AtgeoDecodingError),
+            (b'{"tiles": []}', AtgeoDecodingError),
+            (b'{"records": {}}', AtgeoDecodingError),
+            (b'{"records": null}', AtgeoDecodingError),
+        ],
+    )
+    def test_reports_a_2xx_without_a_usable_payload_as_decode(
+        self, make: Make, body: bytes, error: type[Exception]
+    ) -> None:
+        result = make(serving({tile_url("a"): HttpResponse(200, body), tile_url("b"): GOOD})).search_places(REGION)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.DECODE, None)
+        assert isinstance(failure.error, error)
+        assert result.tiles == TileCounts(fetched=1, failed=1)
+
+    def test_reports_a_network_error_as_transport(self, make: Make) -> None:
+        result = make(two_tiles(network_errors=[tile_url("a")])).search_places(REGION)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.TRANSPORT, None)
+        assert isinstance(failure.error, OSError)
+
+    def test_reports_whatever_a_transport_raises_as_transport_with_its_traceback(self, make: Make) -> None:
+        # A TypeError is the type of a bug, but it came from the app's transport, so it is a failed tile.
+        raised: list[TypeError] = []
+
+        def answer(url: str) -> HttpResponse | None:
+            if url == tile_url("b"):
+                raised.append(TypeError("the app's transport is broken"))
+                raise raised[0]
+            return None
+
+        result = make(two_tiles(answer=answer)).search_places(REGION)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (tile_url("b"), TileFailureKind.TRANSPORT, None)
+        assert failure.error is raised[0]
+        assert failure.error.__traceback__ is not None
+        assert result.tiles == TileCounts(fetched=1, failed=1)
+
+    def test_lists_failures_in_url_order_not_completion_order(self, make: Make) -> None:
+        tiles: dict[str, HttpResponse | None] = {
+            tile_url("e"): HttpResponse(200, b"nope"),
+            tile_url("a"): GOOD,
+            tile_url("d"): None,  # a network error, below
+            "ftp://tiles.example/c.json": None,
+            tile_url("b"): HttpResponse(502, b""),
+        }
+        # b, the first of the fetched failures in URL order, answers last.
+        fake = serving(tiles, network_errors=[tile_url("d")], delays={tile_url("b"): 0.1})
+        result = make(fake).search_places(REGION)
+        assert [(f.url, f.kind, f.status) for f in result.tile_failures] == [
+            ("ftp://tiles.example/c.json", TileFailureKind.REFUSED, None),
+            (tile_url("b"), TileFailureKind.STATUS, 502),
+            (tile_url("d"), TileFailureKind.TRANSPORT, None),
+            (tile_url("e"), TileFailureKind.DECODE, None),
+        ]
+        assert result.tiles == TileCounts(fetched=1, failed=len(result.tile_failures))
+        assert result.complete is False
+
+    def test_compares_failures_without_their_errors(self, make: Make) -> None:
+        first = make(two_tiles([tile_url("b")])).search_places(REGION)
+        second = make(two_tiles([tile_url("b")])).search_places(REGION)
+        assert first.tile_failures[0].error is not second.tile_failures[0].error
+        assert first == second
+        a = TileFailure(url="u", kind=TileFailureKind.DECODE, status=None, error=ValueError("x"))
+        b = TileFailure(url="u", kind=TileFailureKind.DECODE, status=None, error=RuntimeError("y"))
+        assert a == b
+        assert hash(a) == hash(b)
+        assert a != TileFailure(url="u", kind=TileFailureKind.TRANSPORT, status=None, error=ValueError("x"))
+
+    def test_reports_a_cached_tile_that_fails_to_parse_again_as_decode(
+        self, make: Make, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It parsed once when it was stored, so this cannot happen; the guard is there all the same.
+        client = make(two_tiles())
+        client.search_places(REGION)
+        engine = client.inner._engine
+        with engine._lock:
+            engine._parsed.replace({})  # else the memo answers without parsing
+        original = TileEntry.records
+
+        def records(self: TileEntry) -> Any:
+            if b"place:a" in self.body:
+                raise ValueError("unparsable")
+            return original(self)
+
+        monkeypatch.setattr(TileEntry, "records", records)
+        result = client.search_places(REGION)
+        assert [(f.url, f.kind) for f in result.tile_failures] == [(tile_url("a"), TileFailureKind.DECODE)]
+        assert result.tiles == TileCounts(fetched=1, failed=1)
+        assert client.fake.requests.count(tile_url("a")) == 1  # from the cache, not fetched again
+
+
+class TestWhatIsNotAFailedTile:
+    """Contract §4.4: the client's own work after decoding is not guarded, and MemoryError never is."""
+
+    def test_fails_the_search_on_an_error_caching_a_tile(self, make: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+        def broken(self: TileCache, url: str, entry: TileEntry) -> None:
+            raise RuntimeError("a bug in the cache")
+
+        monkeypatch.setattr(TileCache, "set", broken)
+        with pytest.raises(RuntimeError, match="a bug in the cache"):
+            make(two_tiles()).search_places(REGION)
+
+    @pytest.mark.parametrize("where", ["decode", "cache"])
+    def test_fails_the_search_on_a_memory_error(self, make: Make, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+        def exhausted(*_: object) -> Any:
+            raise MemoryError
+
+        if where == "decode":
+            monkeypatch.setattr(_engine, "read_tile_payload", exhausted)
+        else:
+            monkeypatch.setattr(TileCache, "set", exhausted)
+        with pytest.raises(MemoryError):
+            make(two_tiles()).search_places(REGION)
+
+    def test_raises_cancelled_error_with_a_failed_tile_in_hand(self) -> None:
+        fake = two_tiles(network_errors=[tile_url("a")], delays={tile_url("b"): 5})
+
+        async def run() -> None:
+            client = AsyncAtgeoClient(transport=fake.async_transport)
+            task = asyncio.create_task(client.search_places(REGION))
+            while fake.in_flight == 0 or tile_url("a") not in fake.requests:
+                await asyncio.sleep(0.005)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(run())
+        assert fake.in_flight == 0
+
+
+class _Any(Exception):
+    """An error for building an expected TileFailure: ``error`` takes no part in ``==``."""
+
+
+_ANY = _Any()
