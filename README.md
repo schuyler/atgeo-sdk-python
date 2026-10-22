@@ -127,6 +127,8 @@ class SearchHit:
     location: PlaceLocation  # property: point and/or box, parsed as the client parsed them for distance
 ```
 
+`error` is a live exception, so `dataclasses.asdict(result)` copies it along with everything else, and `json.dumps` of that fails once a tile has failed. To serialize a result, take `url`, `kind` and `status` from each entry of `tile_failures` and leave `error` out, as `==` does.
+
 `place` is the dict `json.loads` made of the gazetteer's record, every key in served order and every integer exact. **Don't change it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is the dict in that memo, so a change would show up in the next search. Copy it first with `copy.deepcopy(hit.place)` if you need to (`dict(hit.place)` copies only the top level, so its nested lists and dicts are still the cache's); copying every place by default would cost three times what parsing does. It's annotated `Mapping`, so a type checker catches the mistake.
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.

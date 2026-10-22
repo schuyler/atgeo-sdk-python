@@ -159,16 +159,18 @@ class AtgeoClient:
         ready = [tile_list for tile_list in lists if tile_list is not None]
 
         urls = engine.tile_urls(ready)
-        tiles: _Pool[str, Outcome] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=False)
-        tiles.wait()
-        # A failed tile is an outcome, not an exception: anything a worker raised fails the search.
-        outcomes: list[Outcome] = []
-        for result in tiles.results:
-            assert result is not None
-            ok, value = result
-            if not ok:
-                raise value  # type: ignore[misc]
-            outcomes.append(value)  # type: ignore[arg-type]
+        # A failed tile is an outcome, not an exception: anything a worker raises fails the search, and
+        # the pool stops claiming tiles as soon as one does.
+        tiles: _Pool[str, Outcome] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=True)
+        try:
+            tiles.wait()
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:
+            # A MemoryError among the workers' errors wins, as it does in the async client.
+            exhausted = [v for r in tiles.results if r is not None and isinstance(v := r[1], MemoryError)]
+            raise exhausted[0] if exhausted else e  # noqa: B904
+        outcomes: list[Outcome] = [_value(result) for result in tiles.results]  # type: ignore[misc]
         return returned(engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready)))
 
     def _tile(self, url: str) -> Outcome:

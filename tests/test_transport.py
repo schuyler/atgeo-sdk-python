@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 import urllib.parse
+from http import HTTPStatus
 from typing import Any
 
 import pytest
@@ -344,6 +345,27 @@ class TestMalformedResponses:
         assert says in str(failure.error)
         assert result.tiles == TileCounts(fetched=1, failed=1)
 
+    @pytest.mark.parametrize(
+        "response",
+        [
+            HttpResponse(HTTPStatus.OK, GOOD.body),
+            HttpResponse(200, bytearray(GOOD.body)),  # type: ignore[arg-type]
+            HttpResponse(200, memoryview(GOOD.body)),  # type: ignore[arg-type]
+        ],
+    )
+    def test_takes_an_int_subclass_status_and_a_bytes_like_body(self, make: Make, response: HttpResponse) -> None:
+        # Not stricter than the type allows (contract §14): HTTPStatus is an int, and a bytearray passes mypy.
+        fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
+        fake.responses[tile_url("a")] = response
+        result = make(fake).search_places(REGION)
+        assert result.tile_failures == ()
+        assert result.tiles == TileCounts(fetched=2, failed=0)
+
+    def test_reports_a_non_2xx_http_status_as_an_int(self, make: Make) -> None:
+        fake = serving({tile_url("a"): HttpResponse(HTTPStatus.SERVICE_UNAVAILABLE, b"")})
+        [failure] = make(fake).search_places(REGION).tile_failures
+        assert (failure.kind, failure.status, type(failure.status)) == (TileFailureKind.STATUS, 503, int)
+
 
 class TestWhatIsNotAFailedTile:
     """Contract §4.4: the client's own work after decoding is not guarded, and MemoryError never is."""
@@ -450,3 +472,27 @@ class TestCancellationAndInterrupts:
 
         asyncio.run(run())
         assert len(requested) == MAX_TILES_IN_FLIGHT  # no tile claimed after the cancel
+
+    def test_reports_a_transport_timeout_that_leaves_its_task_cancelling_as_a_failed_tile(self) -> None:
+        # aiohttp 3.10's timeout cancels the task and raises TimeoutError without uncancel(), so the worker's
+        # cancelling() stays raised; the search itself was not cancelled and must return.
+        fake = two_tiles()
+
+        class TimingOut:
+            async def get(self, url: str) -> HttpResponse:
+                if url != tile_url("a"):
+                    return await fake.async_transport.get(url)
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel()
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    raise TimeoutError("total timeout") from None
+                raise AssertionError("not cancelled")
+
+        result = asyncio.run(AsyncAtgeoClient(transport=TimingOut()).search_places(REGION))
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind) == (tile_url("a"), TileFailureKind.TRANSPORT)
+        assert isinstance(failure.error, TimeoutError)
+        assert result.tiles == TileCounts(fetched=1, failed=1)

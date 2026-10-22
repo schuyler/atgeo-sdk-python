@@ -216,16 +216,20 @@ class Engine:
 
     @staticmethod
     def check_response(response: object) -> HttpResponse:
-        """The transport's answer, if it is an HttpResponse with an int status and a bytes body. A malformed
-        one is the transport's fault: called inside the drivers' transport guard, it makes a transport
-        failure rather than an error in the status check or the decoder."""
+        """The transport's answer as an HttpResponse of int and bytes. An int subclass (HTTPStatus) and a
+        bytes-like body (bytearray, memoryview) are taken and normalised; anything else is the transport's
+        fault: called inside the drivers' transport guard, it makes a transport failure rather than an
+        error in the status check or the decoder."""
         if not isinstance(response, HttpResponse):
             raise TypeError(f"transport returned {type(response).__name__}, not HttpResponse")
-        if type(response.status) is not int:
-            raise TypeError(f"transport returned a status of type {type(response.status).__name__}, not int")
-        if not isinstance(response.body, bytes):
-            raise TypeError(f"transport returned a body of type {type(response.body).__name__}, not bytes")
-        return response
+        status, body = response.status, response.body
+        if not isinstance(status, int) or isinstance(status, bool):
+            raise TypeError(f"transport returned a status of type {type(status).__name__}, not int")
+        if not isinstance(body, (bytes, bytearray, memoryview)):
+            raise TypeError(f"transport returned a body of type {type(body).__name__}, not bytes")
+        if type(status) is int and type(body) is bytes:
+            return response
+        return HttpResponse(int(status), bytes(body))
 
     @staticmethod
     def transport_failure(url: str, error: Exception) -> TileFailure:
@@ -324,5 +328,6 @@ def returned(result: SearchResult) -> SearchResult:
     # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).
     # The tile URL reveals the coarse area searched; stdlib logging has no notion of a private field to mark.
     for f in result.tile_failures:
-        _log.debug("tile failed: %s (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
+        # %r for the URL too: the server chose it, and a newline in it must not forge a log line.
+        _log.debug("tile failed: %r (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
     return result

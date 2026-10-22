@@ -7,6 +7,7 @@ them). The ported tests keep their names and their remaining assertions.
 
 from __future__ import annotations
 
+import json
 import logging
 import urllib.parse
 
@@ -14,6 +15,7 @@ import pytest
 
 from atgeo import Bbox, Circle
 from atgeo._cache import TileCache
+from atgeo.transport import HttpResponse
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, overture
@@ -116,6 +118,16 @@ class TestFailedTileLogs:
             text = r.getMessage().lower()
             for needle in needles:
                 assert needle not in text
+
+    def test_logs_a_tile_url_with_a_newline_on_one_line(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
+        bad = "https://tiles.example/x\nERROR forged line"
+        listing = HttpResponse(200, json.dumps({"tiles": [bad]}).encode())
+        fake = FakeServer(answer=lambda url: listing if "getTiles" in url else None)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        assert [f.url for f in make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).tile_failures] == [bad]
+        [entry] = [r for r in caplog.records if r.name == "atgeo"]
+        assert "\n" not in entry.getMessage()
+        assert repr(bad) in entry.getMessage()
 
     def test_logs_nothing_for_a_complete_search(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.DEBUG, logger="atgeo")

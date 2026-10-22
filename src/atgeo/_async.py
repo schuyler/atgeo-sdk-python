@@ -136,13 +136,23 @@ class AsyncAtgeoClient:
         urls = engine.tile_urls(ready)
         outcomes: list[Outcome | None] = [None] * len(urls)
         claimed = 0
+        # Whether this search has been cancelled, judged on the search's own task: a worker's count can be
+        # left raised by a transport's timeout that never uncancels (aiohttp 3.10's TimerContext).
+        search = asyncio.current_task()
+        assert search is not None
+        base = search.cancelling()
+
+        def cancelled() -> bool:
+            return search.cancelling() > base
 
         async def worker() -> None:
             nonlocal claimed
             while claimed < len(urls):
+                if cancelled():  # a transport swallowed the cancellation: claim nothing more
+                    raise asyncio.CancelledError
                 i = claimed
                 claimed += 1
-                outcomes[i] = await self._tile(urls[i])  # anything it raises fails the search
+                outcomes[i] = await self._tile(urls[i], cancelled)  # anything it raises fails the search
 
         try:
             async with asyncio.TaskGroup() as group:
@@ -155,7 +165,7 @@ class AsyncAtgeoClient:
         assert len(done) == len(urls)
         return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview)))
 
-    async def _tile(self, url: str) -> Outcome:
+    async def _tile(self, url: str, cancelled: Callable[[], bool]) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
@@ -172,9 +182,8 @@ class AsyncAtgeoClient:
         except MemoryError:
             raise
         except Exception as e:  # whatever the transport raises; CancelledError is a BaseException and passes
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
-                raise  # a transport that turned our cancellation into an error: the search is cancelled
+            if cancelled():
+                raise  # a transport that turned the search's cancellation into an error of its own
             return engine.transport_failure(url, e)
         return await _in_thread(lambda: engine.load_tile(url, response))
 
