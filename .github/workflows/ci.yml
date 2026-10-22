@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs, but let every commit on main finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --group examples
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run mypy
+
+  # unicodedata's tables travel with the interpreter, so every supported Python runs the fixtures.
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.prerelease || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.14t", "pypy3.11"]
+        include:
+          - { os: ubuntu-latest, python: "3.15", prerelease: true }
+          # Sockets, ssl and signal delivery differ here.
+          - { os: macos-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.14" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run pytest
+
+  # The dependency floors in pyproject.toml are claims; this checks them. Python 3.11, because
+  # aiohttp 3.10.0 has no wheels for 3.13 or 3.14. The test tools go in a separate step, since
+  # --resolution applies to every requirement on the command line.
+  lowest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - run: uv venv
+      - run: uv pip install --resolution lowest-direct ".[async]"
+      - run: uv pip install pytest
+      - run: uv pip list
+      - run: .venv/bin/python -m pytest
+
+  # The wheel installs urllib3 and truststore and nothing else; the async extra adds exactly what
+  # aiohttp's own metadata requires on this Python.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - run: uv run --no-project --python 3.13 python scripts/check_install.py dist
+
+  # The copy-paste adapters in examples/ run the transport tests.
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --group examples
+      - run: uv run pytest tests/test_transports.py
+
+  # truststore against the platform's own certificate store: places.atgeo.org must connect, and
+  # badssl.com's expired and self-signed certificates must not. The only tests that need the network.
+  tls:
+    name: tls (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      - run: uv run pytest -m network tests/test_tls.py
+        env:
+          ATGEO_NETWORK_TESTS: "1"
+
+  # The one check to mark required.
+  ci:
+    needs: [lint, test, lowest, package, examples, tls]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo ok
