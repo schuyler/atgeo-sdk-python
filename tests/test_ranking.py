@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from atgeo._rank import rank, round3
+from atgeo._wire import TileRecord
+from atgeo.types import Bbox, SortMode
+
+from .helpers import place, place_origin, point
+
+REGION = Bbox(-1, -1, 1, 1)
+
+
+class TestRound3:
+    @pytest.mark.parametrize(
+        ("x", "expected"),
+        [(0.0025, 0.003), (0.0015, 0.002), (0.9048, 0.905), (0.49999999999999994, 0.5), (1.0, 1.0), (0.0, 0.0)],
+    )
+    def test_rounds_half_up_like_math_round(self, x: float, expected: float) -> None:
+        assert round3(x) == expected
+
+
+class TestSortKeys:
+    def test_puts_a_null_origin_after_every_string(self) -> None:
+        anon = place("x", "Same", [point(0, 0)], {"origin": None})
+        records = [
+            TileRecord(anon),
+            TileRecord(place("b", "Same", [point(0, 0)])),
+            TileRecord(place("a", "Same", [point(0, 0)])),
+        ]
+        assert [h.origin for h in rank(records, REGION, "", SortMode.FUSED)] == [
+            place_origin("a"),
+            place_origin("b"),
+            None,
+        ]
+
+    def test_orders_origins_by_utf16_code_units(self) -> None:
+        # Code-point order puts U+FF61 before U+10000; UTF-16 order puts it after.
+        low, high = "urn:x:\uff61", "urn:x:\U00010000"
+        records = [TileRecord(place("_", "Same", [point(0, 0)], {"origin": o})) for o in (low, high)]
+        assert [h.origin for h in rank(records, REGION, "", SortMode.FUSED)] == [high, low]
+
+    def test_sorts_a_nan_distance_last(self) -> None:
+        # Out-of-range coordinates are kept as parsed (contract §5); these two make haversine NaN.
+        nan_place = place("nan", "N", [point(95, 180)])
+        near = place("near", "Near", [point(85, 1)])
+        hits = rank([TileRecord(nan_place), TileRecord(near)], Bbox(-1, 85, 1, 85), "", SortMode.DISTANCE)
+        assert [h.origin for h in hits] == [place_origin("near"), place_origin("nan")]
+        assert math.isnan(hits[1].distance)
+
+    def test_ties_negative_zero_with_zero_and_keeps_input_order(self) -> None:
+        # Neither has an origin, so they tie on every key: input order stands.
+        one = place("1", "One", [point(0, 0)], {"origin": None})
+        two = place("2", "Two", [point(-0.0, -0.0)], {"origin": None})
+        names = [h.name for h in rank([TileRecord(one), TileRecord(two)], REGION, "", SortMode.DISTANCE)]
+        assert names == ["One", "Two"]
+
+    def test_negates_huge_importances_without_overflow(self) -> None:
+        recs = [TileRecord(place(i, "Same", [point(0, 0)]), importance=imp) for i, imp in (("a", -1), ("b", 2**62))]
+        assert [h.importance for h in rank(recs, REGION, "", SortMode.FUSED)] == [2**62, -1]

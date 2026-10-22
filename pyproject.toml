@@ -61,7 +61,7 @@ ignore = [
 [tool.mypy]
 strict = true
 python_version = "3.11"
-files = ["src", "tests", "examples", "scripts"]
+files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["requests.*", "httpx.*"]
