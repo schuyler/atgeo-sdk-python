@@ -220,14 +220,16 @@ class Engine:
         bytes-like body (bytearray, memoryview) are taken and normalised; anything else is the transport's
         fault: called inside the drivers' transport guard, it makes a transport failure rather than an
         error in the status check or the decoder."""
-        if not isinstance(response, HttpResponse):
-            raise TypeError(f"transport returned {type(response).__name__}, not HttpResponse")
-        status, body = response.status, response.body
+        # By attribute, as body_of reads getTiles and getPlace answers: a duck-typed response is taken.
+        try:
+            status, body = response.status, response.body  # type: ignore[attr-defined]
+        except AttributeError:
+            raise TypeError(f"transport returned {type(response).__name__}, not an HttpResponse") from None
         if not isinstance(status, int) or isinstance(status, bool):
             raise TypeError(f"transport returned a status of type {type(status).__name__}, not int")
         if not isinstance(body, (bytes, bytearray, memoryview)):
             raise TypeError(f"transport returned a body of type {type(body).__name__}, not bytes")
-        if type(status) is int and type(body) is bytes:
+        if type(response) is HttpResponse and type(status) is int and type(body) is bytes:
             return response
         return HttpResponse(int(status), bytes(body))
 

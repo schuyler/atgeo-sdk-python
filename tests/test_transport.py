@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 import urllib.parse
+from collections import namedtuple
 from http import HTTPStatus
 from typing import Any
 
@@ -326,8 +327,8 @@ class TestMalformedResponses:
     @pytest.mark.parametrize(
         ("response", "says"),
         [
-            (None, "NoneType, not HttpResponse"),
-            ((200, b"{}"), "tuple, not HttpResponse"),
+            (None, "NoneType, not an HttpResponse"),
+            ((200, b"{}"), "tuple, not an HttpResponse"),
             (HttpResponse("503", b""), "status of type str"),  # type: ignore[arg-type]
             (HttpResponse(True, b""), "status of type bool"),
             (HttpResponse(200.0, b"{}"), "status of type float"),  # type: ignore[arg-type]
@@ -365,6 +366,15 @@ class TestMalformedResponses:
         fake = serving({tile_url("a"): HttpResponse(HTTPStatus.SERVICE_UNAVAILABLE, b"")})
         [failure] = make(fake).search_places(REGION).tile_failures
         assert (failure.kind, failure.status, type(failure.status)) == (TileFailureKind.STATUS, 503, int)
+
+    def test_takes_a_duck_typed_response(self, make: Make) -> None:
+        # As getTiles takes one: by attribute, not by class.
+        Response = namedtuple("Response", ["status", "body"])
+        fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
+        fake.responses[tile_url("a")] = Response(200, GOOD.body)  # type: ignore[assignment]
+        result = make(fake).search_places(REGION)
+        assert result.complete is True
+        assert result.tiles == TileCounts(fetched=2, failed=0)
 
 
 class TestWhatIsNotAFailedTile:
@@ -466,7 +476,7 @@ class TestCancellationAndInterrupts:
             await started.wait()
             task.cancel()
             start = time.monotonic()
-            with pytest.raises((asyncio.CancelledError, RuntimeError)):
+            with pytest.raises(asyncio.CancelledError):  # asyncio's convention, not the transport's error
                 await task
             assert time.monotonic() - start < 1
 
@@ -496,3 +506,47 @@ class TestCancellationAndInterrupts:
         assert (failure.url, failure.kind) == (tile_url("a"), TileFailureKind.TRANSPORT)
         assert isinstance(failure.error, TimeoutError)
         assert result.tiles == TileCounts(fetched=1, failed=1)
+
+
+class TestTransportCancellingItsOwnRequest:
+    """A transport whose own deadline cancels its request, though nobody cancelled the search: a failed
+    tile of kind transport, and the search goes on."""
+
+    @staticmethod
+    def self_cancelling(urls: list[str], bad: set[str], *, escape: bool) -> Any:
+        listing = HttpResponse(200, json.dumps({"tiles": urls}).encode())
+        good = HttpResponse(200, b'{"records": []}')
+
+        class SelfCancelling:
+            async def get(self, url: str) -> HttpResponse:
+                if "/xrpc/" in url:
+                    return listing
+                if url in bad:
+                    task = asyncio.current_task()
+                    assert task is not None
+                    task.cancel()
+                    if escape:
+                        await asyncio.sleep(1)  # the CancelledError escapes the transport
+                    # else it returns, and the cancellation lands at the client's next await
+                return good
+
+        return SelfCancelling()
+
+    @pytest.mark.parametrize("escape", [True, False])
+    def test_reports_it_as_a_transport_failure(self, escape: bool) -> None:
+        urls = [tile_url(f"t{n}") for n in range(3)]
+        transport = self.self_cancelling(urls, {urls[1]}, escape=escape)
+        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION))
+        assert result.tiles == TileCounts(fetched=2, failed=1)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (urls[1], TileFailureKind.TRANSPORT, None)
+        assert isinstance(failure.error, TimeoutError)
+        assert isinstance(failure.error.__cause__, asyncio.CancelledError)
+
+    def test_reports_every_tile_when_every_worker_is_cancelled(self) -> None:
+        urls = [tile_url(f"t{n:02}") for n in range(MAX_TILES_IN_FLIGHT + 3)]
+        transport = self.self_cancelling(urls, set(urls), escape=True)
+        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION))
+        assert result.tiles == TileCounts(fetched=0, failed=len(urls))
+        assert [f.url for f in result.tile_failures] == urls
+        assert {f.kind for f in result.tile_failures} == {TileFailureKind.TRANSPORT}

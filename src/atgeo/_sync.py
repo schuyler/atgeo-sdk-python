@@ -167,7 +167,9 @@ class AtgeoClient:
         except KeyboardInterrupt:
             raise
         except BaseException as e:
-            # A MemoryError among the workers' errors wins, as it does in the async client.
+            # A MemoryError among the workers' errors wins, as it does in the async client. One that arrives
+            # after this, from a request still in flight, is lost: waiting for those would hold up the raise,
+            # and Ctrl-C, for as long as the slowest request takes.
             exhausted = [v for r in tiles.results if r is not None and isinstance(v := r[1], MemoryError)]
             raise exhausted[0] if exhausted else e  # noqa: B904
         outcomes: list[Outcome] = [_value(result) for result in tiles.results]  # type: ignore[misc]

@@ -136,23 +136,46 @@ class AsyncAtgeoClient:
         urls = engine.tile_urls(ready)
         outcomes: list[Outcome | None] = [None] * len(urls)
         claimed = 0
-        # Whether this search has been cancelled, judged on the search's own task: a worker's count can be
-        # left raised by a transport's timeout that never uncancels (aiohttp 3.10's TimerContext).
+        # Whether the search is stopping: its own task was cancelled, or a worker failed it and the group is
+        # cancelling the rest. Judged on the search, not the worker: a worker's count can be left raised by a
+        # transport's timeout that never uncancels (aiohttp 3.10's TimerContext), and a transport can cancel
+        # its own request.
         search = asyncio.current_task()
         assert search is not None
         base = search.cancelling()
+        failed = False
 
-        def cancelled() -> bool:
-            return search.cancelling() > base
+        def stopping() -> bool:
+            return failed or search.cancelling() > base
 
         async def worker() -> None:
-            nonlocal claimed
-            while claimed < len(urls):
-                if cancelled():  # a transport swallowed the cancellation: claim nothing more
-                    raise asyncio.CancelledError
-                i = claimed
-                claimed += 1
-                outcomes[i] = await self._tile(urls[i], cancelled)  # anything it raises fails the search
+            nonlocal claimed, failed
+            me = asyncio.current_task()
+            assert me is not None
+            mine = me.cancelling()
+            try:
+                while claimed < len(urls):
+                    if stopping():  # a transport swallowed the cancellation: claim nothing more
+                        raise asyncio.CancelledError
+                    i = claimed
+                    claimed += 1
+                    try:
+                        outcomes[i] = await self._tile(urls[i], stopping)  # anything else fails the search
+                    except asyncio.CancelledError as e:
+                        if stopping():
+                            raise
+                        # Nobody cancelled the search: the transport cancelled its own request, a deadline of
+                        # its own. That is a failed tile; undo the cancellation so the next await is not hit.
+                        while me.cancelling() > mine:
+                            me.uncancel()
+                        error = TimeoutError("transport cancelled its own request")
+                        error.__cause__ = e
+                        outcomes[i] = engine.transport_failure(urls[i], error)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                failed = True
+                raise
 
         try:
             async with asyncio.TaskGroup() as group:
@@ -162,10 +185,11 @@ class AsyncAtgeoClient:
             raise _first(eg)  # noqa: B904
         overview = any(tile_list.overview for tile_list in ready)
         done = [outcome for outcome in outcomes if outcome is not None]
-        assert len(done) == len(urls)
+        if len(done) != len(urls):  # every worker ran to its end, so this would be a bug in the loop above
+            raise RuntimeError(f"{len(urls) - len(done)} of {len(urls)} tiles were never loaded")
         return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview)))
 
-    async def _tile(self, url: str, cancelled: Callable[[], bool]) -> Outcome:
+    async def _tile(self, url: str, stopping: Callable[[], bool]) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
@@ -182,8 +206,10 @@ class AsyncAtgeoClient:
         except MemoryError:
             raise
         except Exception as e:  # whatever the transport raises; CancelledError is a BaseException and passes
-            if cancelled():
-                raise  # a transport that turned the search's cancellation into an error of its own
+            if stopping():
+                # A transport that turned the search's cancellation into an error of its own: cancelled, as
+                # task.cancel(), asyncio.timeout and wait_for expect, with its error as the cause.
+                raise asyncio.CancelledError from e
             return engine.transport_failure(url, e)
         return await _in_thread(lambda: engine.load_tile(url, response))
 
