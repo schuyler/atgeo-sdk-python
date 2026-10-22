@@ -41,9 +41,18 @@ class TestTilesInFlight:
         assert fake.peak_in_flight == 8
 
     def test_claim_urls_in_order(self, make: Make) -> None:
-        fake = many_tiles(20)
-        make(fake).search_places(REGION)
-        assert fake.requests[1:] == [tile(i) for i in range(20)]
+        # URLs are claimed in order; with eight threads calling the transport at once, the requests can still
+        # arrive interleaved (free-threaded CPython and PyPy show it), so the sync client is checked for the
+        # first eight as a set. The async client claims and calls on one thread, in order.
+        fake = many_tiles(20, delay=0.2)
+        client = make(fake)
+        client.search_places(REGION)
+        requested = fake.requests[1:]
+        assert sorted(requested) == [tile(i) for i in range(20)]
+        if client.kind == "async":
+            assert requested == [tile(i) for i in range(20)]
+        else:
+            assert set(requested[:8]) == {tile(i) for i in range(8)}
 
 
 class TestFailedGetTiles:
