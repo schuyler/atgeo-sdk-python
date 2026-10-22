@@ -118,7 +118,8 @@ class TileFailure:
     ``url`` is the tile URL as the tile list gave it, and ``status`` the HTTP status for ``STATUS``, else None.
     ``error`` is what went wrong, with its traceback: an :class:`AtgeoError` for ``STATUS``, whatever the
     parser raised for ``DECODE``, the transport's own exception for ``TRANSPORT``, a ``ValueError`` for
-    ``REFUSED``. It is left out of ``==`` and ``hash``, since its type and message are Python's own.
+    ``REFUSED``. It is left out of ``==`` and ``hash``, since its type and message are Python's own. Holding
+    on to it keeps its traceback, and through it the client, alive.
     """
 
     url: str

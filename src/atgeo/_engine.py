@@ -215,6 +215,19 @@ class Engine:
         return prepare_url(url)
 
     @staticmethod
+    def check_response(response: object) -> HttpResponse:
+        """The transport's answer, if it is an HttpResponse with an int status and a bytes body. A malformed
+        one is the transport's fault: called inside the drivers' transport guard, it makes a transport
+        failure rather than an error in the status check or the decoder."""
+        if not isinstance(response, HttpResponse):
+            raise TypeError(f"transport returned {type(response).__name__}, not HttpResponse")
+        if type(response.status) is not int:
+            raise TypeError(f"transport returned a status of type {type(response.status).__name__}, not int")
+        if not isinstance(response.body, bytes):
+            raise TypeError(f"transport returned a body of type {type(response.body).__name__}, not bytes")
+        return response
+
+    @staticmethod
     def transport_failure(url: str, error: Exception) -> TileFailure:
         """A tile whose transport raised. The driver catches; MemoryError it lets through."""
         return TileFailure(url=url, kind=TileFailureKind.TRANSPORT, status=None, error=error)
@@ -256,19 +269,13 @@ class Engine:
             prefix = f"urn:atgeo:{plan.dataset}:{plan.collection}:"
             records = [r for r in records if type(o := r.value.get("origin")) is str and o.startswith(prefix)]
         records = [r for r in records if in_region(locate(r.value), plan.region)]
-        result = SearchResult(
+        return SearchResult(
             places=rank(records, plan.region, plan.query, plan.sort),
             complete=not failures,
             overview=overview,
             tiles=TileCounts(fetched=len(used), failed=len(failures)),
             tile_failures=tuple(failures),
         )
-        # Logged once the search has a result: a search that fails reports no failed tiles (contract §4.4).
-        # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).
-        # The tile URL reveals the coarse area searched; stdlib logging has no notion of a private field to mark.
-        for f in failures:
-            _log.debug("tile failed: %s (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
-        return result
 
     # getPlace, describeService, describeTileset.
 
@@ -309,3 +316,13 @@ class Engine:
 
     def read_tileset(self, response: HttpResponse) -> Tileset:
         return read_tileset(self.body_of(response))
+
+
+def returned(result: SearchResult) -> SearchResult:
+    """A search's result, its failed tiles logged. The drivers call it as the search returns, never sooner:
+    a search that fails or is cancelled reports no failed tiles (contract §4.4)."""
+    # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).
+    # The tile URL reveals the coarse area searched; stdlib logging has no notion of a private field to mark.
+    for f in result.tile_failures:
+        _log.debug("tile failed: %s (%s, status %s): %r", f.url, f.kind.value, f.status, f.error)
+    return result

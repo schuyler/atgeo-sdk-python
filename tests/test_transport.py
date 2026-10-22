@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.parse
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 
 from atgeo import (
     AsyncAtgeoClient,
+    AtgeoClient,
     AtgeoDecodingError,
     AtgeoError,
     Bbox,
@@ -21,6 +23,7 @@ from atgeo import (
     _engine,
 )
 from atgeo._cache import TileCache, TileEntry
+from atgeo._engine import MAX_TILES_IN_FLIGHT
 from atgeo.transport import HttpResponse
 
 from .conftest import Make
@@ -315,6 +318,33 @@ class TestTileFailures:
         assert client.fake.requests.count(tile_url("a")) == 1  # from the cache, not fetched again
 
 
+class TestMalformedResponses:
+    """A transport that returns something other than an HttpResponse of int and bytes: a transport failure,
+    not an error in the status check or the decoder that fails the search (contract §4.4)."""
+
+    @pytest.mark.parametrize(
+        ("response", "says"),
+        [
+            (None, "NoneType, not HttpResponse"),
+            ((200, b"{}"), "tuple, not HttpResponse"),
+            (HttpResponse("503", b""), "status of type str"),  # type: ignore[arg-type]
+            (HttpResponse(True, b""), "status of type bool"),
+            (HttpResponse(200.0, b"{}"), "status of type float"),  # type: ignore[arg-type]
+            (HttpResponse(404, None), "body of type NoneType"),  # type: ignore[arg-type]
+            (HttpResponse(200, '{"records": []}'), "body of type str"),  # type: ignore[arg-type]
+        ],
+    )
+    def test_reports_a_malformed_response_as_transport(self, make: Make, response: object, says: str) -> None:
+        fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
+        fake.responses[tile_url("a")] = response  # type: ignore[assignment]
+        result = make(fake).search_places(REGION)
+        [failure] = result.tile_failures
+        assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.TRANSPORT, None)
+        assert isinstance(failure.error, TypeError)
+        assert says in str(failure.error)
+        assert result.tiles == TileCounts(fetched=1, failed=1)
+
+
 class TestWhatIsNotAFailedTile:
     """Contract §4.4: the client's own work after decoding is not guarded, and MemoryError never is."""
 
@@ -359,3 +389,64 @@ class _Any(Exception):
 
 
 _ANY = _Any()
+
+
+class TestCancellationAndInterrupts:
+    def test_fails_the_search_on_a_memory_error_reparsing_a_cached_tile(
+        self, make: Make, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = make(two_tiles())
+        client.search_places(REGION)
+        engine = client.inner._engine
+        with engine._lock:
+            engine._parsed.replace({})  # else the memo answers without parsing
+
+        def exhausted(self: TileEntry) -> Any:
+            raise MemoryError
+
+        monkeypatch.setattr(TileEntry, "records", exhausted)
+        with pytest.raises(MemoryError):
+            client.search_places(REGION)
+
+    def test_fails_a_blocking_search_on_keyboard_interrupt_from_the_transport(self) -> None:
+        def answer(url: str) -> HttpResponse | None:
+            if url == tile_url("a"):
+                raise KeyboardInterrupt
+            return None
+
+        with pytest.raises(KeyboardInterrupt):
+            AtgeoClient(transport=two_tiles(answer=answer).transport).search_places(REGION)
+
+    def test_stays_cancelled_when_the_transport_turns_cancellation_into_an_error(self) -> None:
+        # More tiles than workers: a worker that took the transport's error for a failed tile would claim the
+        # next URL, whose request the spent cancellation no longer interrupts, and the search would hang on it.
+        urls = [tile_url(f"t{n:02}") for n in range(MAX_TILES_IN_FLIGHT + 2)]
+        listing = HttpResponse(200, json.dumps({"tiles": urls}).encode())
+        requested: list[str] = []
+        started = asyncio.Event()
+
+        class Swallowing:
+            async def get(self, url: str) -> HttpResponse:
+                if "/xrpc/" in url:
+                    return listing
+                requested.append(url)
+                if len(requested) == MAX_TILES_IN_FLIGHT:
+                    started.set()
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    raise RuntimeError("the transport's own error, in place of the cancellation") from None
+                raise AssertionError("not cancelled")
+
+        async def run() -> None:
+            client = AsyncAtgeoClient(transport=Swallowing())
+            task = asyncio.create_task(client.search_places(REGION))
+            await started.wait()
+            task.cancel()
+            start = time.monotonic()
+            with pytest.raises((asyncio.CancelledError, RuntimeError)):
+                await task
+            assert time.monotonic() - start < 1
+
+        asyncio.run(run())
+        assert len(requested) == MAX_TILES_IN_FLIGHT  # no tile claimed after the cancel

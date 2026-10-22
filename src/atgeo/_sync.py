@@ -14,6 +14,7 @@ from ._engine import (
     Engine,
     Outcome,
     TileListRequest,
+    returned,
 )
 from ._threads import start_daemon
 from ._wire import TileList
@@ -168,7 +169,7 @@ class AtgeoClient:
             if not ok:
                 raise value  # type: ignore[misc]
             outcomes.append(value)  # type: ignore[arg-type]
-        return engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready))
+        return returned(engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready)))
 
     def _tile(self, url: str) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
@@ -181,7 +182,7 @@ class AtgeoClient:
         if isinstance(request, TileFailure):
             return request
         try:
-            response = self._transport.get(request)
+            response = engine.check_response(self._transport.get(request))
         except MemoryError:
             raise
         except Exception as e:  # whatever the transport raises; KeyboardInterrupt is a BaseException and passes

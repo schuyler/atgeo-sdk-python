@@ -13,6 +13,7 @@ import urllib.parse
 import pytest
 
 from atgeo import Bbox, Circle
+from atgeo._cache import TileCache
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, overture
@@ -119,4 +120,21 @@ class TestFailedTileLogs:
     def test_logs_nothing_for_a_complete_search(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.DEBUG, logger="atgeo")
         setup(make).search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        assert [r for r in caplog.records if r.name.startswith("atgeo")] == []
+
+    def test_logs_nothing_for_a_search_that_fails(
+        self, make: Make, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two tiles, one failing; storing the other raises, so the search fails with a failed tile in hand.
+        client = setup(make)
+        client.fake.tilesets[0].tiles.append(FakeTile("https://tiles.example/t0.json", []))
+        client.fake.fail_tiles.add("https://tiles.example/t0.json")
+
+        def broken(*_: object) -> None:
+            raise RuntimeError("a bug in the cache")
+
+        monkeypatch.setattr(TileCache, "set", broken)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        with pytest.raises(RuntimeError):
+            client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
         assert [r for r in caplog.records if r.name.startswith("atgeo")] == []

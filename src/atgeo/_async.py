@@ -15,6 +15,7 @@ from ._engine import (
     Engine,
     Outcome,
     TileListRequest,
+    returned,
 )
 from ._threads import start_daemon
 from ._wire import TileList
@@ -152,7 +153,7 @@ class AsyncAtgeoClient:
         overview = any(tile_list.overview for tile_list in ready)
         done = [outcome for outcome in outcomes if outcome is not None]
         assert len(done) == len(urls)
-        return await _in_thread(lambda: engine.assemble(plan, urls, done, overview))
+        return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview)))
 
     async def _tile(self, url: str) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
@@ -167,10 +168,13 @@ class AsyncAtgeoClient:
         if isinstance(request, TileFailure):
             return request
         try:
-            response = await self._transport.get(request)
+            response = engine.check_response(await self._transport.get(request))
         except MemoryError:
             raise
         except Exception as e:  # whatever the transport raises; CancelledError is a BaseException and passes
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise  # a transport that turned our cancellation into an error: the search is cancelled
             return engine.transport_failure(url, e)
         return await _in_thread(lambda: engine.load_tile(url, response))
 
