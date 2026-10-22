@@ -294,7 +294,7 @@ examples = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'async'", specifier = ">=3.10" },
-    { name = "truststore", specifier = ">=0.10" },
+    { name = "truststore", specifier = ">=0.10.1" },
     { name = "urllib3", specifier = ">=2.2" },
 ]
 provides-extras = ["async"]

@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: GIS",
     "Typing :: Typed",
 ]
-dependencies = ["urllib3>=2.2", "truststore>=0.10"]
+dependencies = ["urllib3>=2.2", "truststore>=0.10.1"]
 
 [project.optional-dependencies]
 async = ["aiohttp>=3.10"]
@@ -61,7 +61,7 @@ ignore = [
 [tool.mypy]
 strict = true
 python_version = "3.11"
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
 
 [[tool.mypy.overrides]]
 module = ["requests.*", "httpx.*"]
