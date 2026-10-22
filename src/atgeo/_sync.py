@@ -12,9 +12,9 @@ from ._engine import (
     DEFAULT_SERVER,
     MAX_TILES_IN_FLIGHT,
     Engine,
-    Tile,
+    Outcome,
     TileListRequest,
-    is_tile_failure,
+    returned,
 )
 from ._threads import start_daemon
 from ._wire import TileList
@@ -25,6 +25,7 @@ from .types import (
     SearchResult,
     ServiceDescription,
     SortMode,
+    TileFailure,
     Tileset,
 )
 
@@ -158,26 +159,39 @@ class AtgeoClient:
         ready = [tile_list for tile_list in lists if tile_list is not None]
 
         urls = engine.tile_urls(ready)
-        tiles: _Pool[str, Tile] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=False)
-        tiles.wait()
-        loaded: list[Tile | None] = []
-        for result in tiles.results:
-            assert result is not None
-            ok, value = result
-            if ok:
-                loaded.append(value)  # type: ignore[arg-type]
-            elif is_tile_failure(value):  # type: ignore[arg-type]
-                loaded.append(None)
-            else:
-                raise value  # type: ignore[misc]  # MemoryError fails the search
-        return engine.assemble(plan, urls, loaded, any(tile_list.overview for tile_list in ready))
+        # A failed tile is an outcome, not an exception: anything a worker raises fails the search, and
+        # the pool stops claiming tiles as soon as one does.
+        tiles: _Pool[str, Outcome] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=True)
+        try:
+            tiles.wait()
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:
+            # A MemoryError among the workers' errors wins, as it does in the async client. One that arrives
+            # after this, from a request still in flight, is lost: waiting for those would hold up the raise,
+            # and Ctrl-C, for as long as the slowest request takes.
+            exhausted = [v for r in tiles.results if r is not None and isinstance(v := r[1], MemoryError)]
+            raise exhausted[0] if exhausted else e  # noqa: B904
+        outcomes: list[Outcome] = [_value(result) for result in tiles.results]  # type: ignore[misc]
+        return returned(engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready)))
 
-    def _tile(self, url: str) -> Tile:
+    def _tile(self, url: str) -> Outcome:
+        """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
-            return engine.parsed(url, entry)
-        return engine.store_tile(url, self._transport.get(engine.tile_request(url)))
+            records = engine.memo(url, entry)
+            return (entry, records) if records is not None else engine.reparse(url, entry)
+        request = engine.tile_request(url)
+        if isinstance(request, TileFailure):
+            return request
+        try:
+            response = engine.check_response(self._transport.get(request))
+        except MemoryError:
+            raise
+        except Exception as e:  # whatever the transport raises; KeyboardInterrupt is a BaseException and passes
+            return engine.transport_failure(url, e)
+        return engine.load_tile(url, response)
 
     def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""

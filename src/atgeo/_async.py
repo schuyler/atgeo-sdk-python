@@ -13,13 +13,14 @@ from ._engine import (
     DEFAULT_SERVER,
     MAX_TILES_IN_FLIGHT,
     Engine,
-    Tile,
+    Outcome,
     TileListRequest,
+    returned,
 )
 from ._threads import start_daemon
 from ._wire import TileList
 from .transport import AsyncTransport
-from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, Tileset
+from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, TileFailure, Tileset
 
 _T = TypeVar("_T")
 
@@ -133,20 +134,48 @@ class AsyncAtgeoClient:
         ready = [tile_list for tile_list in lists if tile_list is not None]
 
         urls = engine.tile_urls(ready)
-        tiles: list[Tile | None] = [None] * len(urls)
+        outcomes: list[Outcome | None] = [None] * len(urls)
         claimed = 0
+        # Whether the search is stopping: its own task was cancelled, or a worker failed it and the group is
+        # cancelling the rest. Judged on the search, not the worker: a worker's count can be left raised by a
+        # transport's timeout that never uncancels (aiohttp 3.10's TimerContext), and a transport can cancel
+        # its own request.
+        search = asyncio.current_task()
+        assert search is not None
+        base = search.cancelling()
+        failed = False
+
+        def stopping() -> bool:
+            return failed or search.cancelling() > base
 
         async def worker() -> None:
-            nonlocal claimed
-            while claimed < len(urls):
-                i = claimed
-                claimed += 1
-                try:
-                    tiles[i] = await self._tile(urls[i])
-                except MemoryError:
-                    raise
-                except Exception:  # a failed tile; CancelledError is a BaseException and passes
-                    tiles[i] = None
+            nonlocal claimed, failed
+            me = asyncio.current_task()
+            assert me is not None
+            mine = me.cancelling()
+            try:
+                while claimed < len(urls):
+                    if stopping():  # a transport swallowed the cancellation: claim nothing more
+                        raise asyncio.CancelledError
+                    i = claimed
+                    claimed += 1
+                    try:
+                        outcomes[i] = await self._tile(urls[i], stopping)  # anything else fails the search
+                    except asyncio.CancelledError as e:
+                        if stopping():
+                            raise
+                        # Nobody cancelled the search: the transport cancelled its own request, a deadline of
+                        # its own. That is a failed tile; undo the cancellation so the next await is not hit.
+                        while me.cancelling() > mine:
+                            me.uncancel()
+                        error = TimeoutError("transport cancelled its own request")
+                        error.__cause__ = e
+                        outcomes[i] = engine.transport_failure(urls[i], error)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                failed = True
+                raise
 
         try:
             async with asyncio.TaskGroup() as group:
@@ -155,18 +184,34 @@ class AsyncAtgeoClient:
         except BaseExceptionGroup as eg:
             raise _first(eg)  # noqa: B904
         overview = any(tile_list.overview for tile_list in ready)
-        return await _in_thread(lambda: engine.assemble(plan, urls, tiles, overview))
+        done = [outcome for outcome in outcomes if outcome is not None]
+        if len(done) != len(urls):  # every worker ran to its end, so this would be a bug in the loop above
+            raise RuntimeError(f"{len(urls) - len(done)} of {len(urls)} tiles were never loaded")
+        return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview)))
 
-    async def _tile(self, url: str) -> Tile:
+    async def _tile(self, url: str, stopping: Callable[[], bool]) -> Outcome:
+        """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
             records = engine.memo(url, entry)
             if records is not None:
                 return entry, records
-            return await _in_thread(lambda: (entry, entry.records()))
-        response = await self._transport.get(engine.tile_request(url))
-        return await _in_thread(lambda: engine.store_tile(url, response))
+            return await _in_thread(lambda: engine.reparse(url, entry))
+        request = engine.tile_request(url)
+        if isinstance(request, TileFailure):
+            return request
+        try:
+            response = engine.check_response(await self._transport.get(request))
+        except MemoryError:
+            raise
+        except Exception as e:  # whatever the transport raises; CancelledError is a BaseException and passes
+            if stopping():
+                # A transport that turned the search's cancellation into an error of its own: cancelled, as
+                # task.cancel(), asyncio.timeout and wait_for expect, with its error as the cause.
+                raise asyncio.CancelledError from e
+            return engine.transport_failure(url, e)
+        return await _in_thread(lambda: engine.load_tile(url, response))
 
     async def get_place(self, origin: str) -> PlaceRecord:
         """A place by origin (or, for a record with none, by its tile record's uri)."""

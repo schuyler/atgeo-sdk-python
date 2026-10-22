@@ -7,11 +7,15 @@ them). The ported tests keep their names and their remaining assertions.
 
 from __future__ import annotations
 
+import json
+import logging
 import urllib.parse
 
 import pytest
 
 from atgeo import Bbox, Circle
+from atgeo._cache import TileCache
+from atgeo.transport import HttpResponse
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, overture
@@ -92,3 +96,57 @@ class TestGetPlaceSendsOnlyTheOrigin:
         parts = urllib.parse.urlsplit(url)
         assert parts.path == "/xrpc/org.atgeo.getPlace"
         assert urllib.parse.parse_qsl(parts.query) == [("uri", origin)]
+
+
+class TestFailedTileLogs:
+    """Contract §12 and §14: a failed tile is logged at DEBUG, with its entry's fields and nothing else."""
+
+    def test_logs_a_failed_tile_at_debug_without_the_text_or_the_region(
+        self, make: Make, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = setup(make)
+        client.fake.fail_tiles.add(TILE)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        result = client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka")
+        assert len(result.tile_failures) == 1
+        [entry] = [r for r in caplog.records if r.name == "atgeo"]
+        assert entry.levelno == logging.DEBUG
+        assert TILE in entry.getMessage()
+        assert "(status, status 500)" in entry.getMessage()
+        needles = ["zanzibar", "quokka", "37.7749295", "122.4194155", "7749295", "4194155", "123.456789", "37.77,"]
+        for r in caplog.records:
+            text = r.getMessage().lower()
+            for needle in needles:
+                assert needle not in text
+
+    def test_logs_a_tile_url_with_a_newline_on_one_line(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
+        bad = "https://tiles.example/x\nERROR forged line"
+        listing = HttpResponse(200, json.dumps({"tiles": [bad]}).encode())
+        fake = FakeServer(answer=lambda url: listing if "getTiles" in url else None)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        assert [f.url for f in make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).tile_failures] == [bad]
+        [entry] = [r for r in caplog.records if r.name == "atgeo"]
+        assert "\n" not in entry.getMessage()
+        assert repr(bad) in entry.getMessage()
+
+    def test_logs_nothing_for_a_complete_search(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        setup(make).search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        assert [r for r in caplog.records if r.name.startswith("atgeo")] == []
+
+    def test_logs_nothing_for_a_search_that_fails(
+        self, make: Make, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two tiles, one failing; storing the other raises, so the search fails with a failed tile in hand.
+        client = setup(make)
+        client.fake.tilesets[0].tiles.append(FakeTile("https://tiles.example/t0.json", []))
+        client.fake.fail_tiles.add("https://tiles.example/t0.json")
+
+        def broken(*_: object) -> None:
+            raise RuntimeError("a bug in the cache")
+
+        monkeypatch.setattr(TileCache, "set", broken)
+        caplog.set_level(logging.DEBUG, logger="atgeo")
+        with pytest.raises(RuntimeError):
+            client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        assert [r for r in caplog.records if r.name.startswith("atgeo")] == []
