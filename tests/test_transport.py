@@ -320,6 +320,13 @@ class TestTileFailures:
         assert client.fake.requests.count(tile_url("a")) == 1  # from the cache, not fetched again
 
 
+class IntLike:
+    """A status as numpy.int64 is one: not an int, but an __index__."""
+
+    def __index__(self) -> int:
+        return 200
+
+
 class TestMalformedResponses:
     """A transport that returns something other than an HttpResponse of int and bytes: a transport failure,
     not an error in the status check or the decoder that fails the search (contract §4.4)."""
@@ -331,7 +338,8 @@ class TestMalformedResponses:
             ((200, b"{}"), "tuple, not an HttpResponse"),
             (HttpResponse("503", b""), "status of type str"),  # type: ignore[arg-type]
             (HttpResponse(True, b""), "status of type bool"),
-            (HttpResponse(200.0, b"{}"), "status of type float"),  # type: ignore[arg-type]
+            (HttpResponse(200.5, b"{}"), "status of type float"),  # type: ignore[arg-type]
+            (HttpResponse(float("nan"), b"{}"), "status of type float"),  # type: ignore[arg-type]
             (HttpResponse(404, None), "body of type NoneType"),  # type: ignore[arg-type]
             (HttpResponse(200, '{"records": []}'), "body of type str"),  # type: ignore[arg-type]
         ],
@@ -350,11 +358,13 @@ class TestMalformedResponses:
         "response",
         [
             HttpResponse(HTTPStatus.OK, GOOD.body),
+            HttpResponse(200.0, GOOD.body),  # type: ignore[arg-type]
+            HttpResponse(IntLike(), GOOD.body),  # type: ignore[arg-type]
             HttpResponse(200, bytearray(GOOD.body)),  # type: ignore[arg-type]
             HttpResponse(200, memoryview(GOOD.body)),  # type: ignore[arg-type]
         ],
     )
-    def test_takes_an_int_subclass_status_and_a_bytes_like_body(self, make: Make, response: HttpResponse) -> None:
+    def test_takes_an_int_like_status_and_a_bytes_like_body(self, make: Make, response: HttpResponse) -> None:
         # Not stricter than the type allows (contract §14): HTTPStatus is an int, and a bytearray passes mypy.
         fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
         fake.responses[tile_url("a")] = response

@@ -96,6 +96,18 @@ def _scalar_values(s: str) -> str:
     return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
+def _status_code(status: object) -> int | None:
+    """A response status as an int: an int-like or a float with no fractional part. Not a bool."""
+    if isinstance(status, bool):
+        return None
+    if isinstance(status, float):
+        return int(status) if status.is_integer() else None
+    try:
+        return operator.index(status)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+
+
 def check_budget(budget: int) -> int:
     """A byte count. Checked here, since a wrong type would otherwise fail inside every tile store, failing
     every search with an error from deep in the cache rather than one naming the argument."""
@@ -210,14 +222,16 @@ class Engine:
         """The URL a tile is fetched from, or, for one that is not absolute http(s) or carries credentials,
         a refused tile, with no request made."""
         if not is_http_url(url):
-            error = ValueError(f"tile URL {url!r} is not an absolute http or https URL without credentials")
+            # The URL is the entry's own field; not repeated here, so a credential in it is not logged twice.
+            error = ValueError("tile URL is not an absolute http or https URL without credentials")
             return TileFailure(url=url, kind=TileFailureKind.REFUSED, status=None, error=error)
         return prepare_url(url)
 
     @staticmethod
     def check_response(response: object) -> HttpResponse:
-        """The transport's answer as an HttpResponse of int and bytes. An int subclass (HTTPStatus) and a
-        bytes-like body (bytearray, memoryview) are taken and normalised; anything else is the transport's
+        """The transport's answer as an HttpResponse of int and bytes. A status that is an int-like (HTTPStatus,
+        numpy.int64) or an integral float (200.0), and a bytes-like body (bytearray, memoryview), are taken and
+        normalised; anything else is the transport's
         fault: called inside the drivers' transport guard, it makes a transport failure rather than an
         error in the status check or the decoder."""
         # By attribute, as body_of reads getTiles and getPlace answers: a duck-typed response is taken.
@@ -225,13 +239,14 @@ class Engine:
             status, body = response.status, response.body  # type: ignore[attr-defined]
         except AttributeError:
             raise TypeError(f"transport returned {type(response).__name__}, not an HttpResponse") from None
-        if not isinstance(status, int) or isinstance(status, bool):
-            raise TypeError(f"transport returned a status of type {type(status).__name__}, not int")
+        code = _status_code(status)
+        if code is None:
+            raise TypeError(f"transport returned a status of type {type(status).__name__}, not int: {status!r}")
         if not isinstance(body, (bytes, bytearray, memoryview)):
             raise TypeError(f"transport returned a body of type {type(body).__name__}, not bytes")
         if type(response) is HttpResponse and type(status) is int and type(body) is bytes:
             return response
-        return HttpResponse(int(status), bytes(body))
+        return HttpResponse(code, bytes(body))
 
     @staticmethod
     def transport_failure(url: str, error: Exception) -> TileFailure:

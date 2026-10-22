@@ -46,7 +46,7 @@ A query value holding a lone surrogate (from a Python string; JSON can carry one
 
 ## Failed tiles (contract §4.4)
 
-The reference counts failed tiles but does not say which; this port lists each in `tile_failures`. The reference's tile loop also catches every error, its own cache insert's included, so a bug there passes for a run of bad tiles; here an error after a tile has decoded fails the search, as the contract asks. A payload with no `records` list fails its tile in both, here through a check rather than the `TypeError` the reference's `.map` throws.
+The reference counts failed tiles but does not say which; this port lists each in `tile_failures`. The reference's tile loop also catches every error, its own cache insert's included, so a bug there passes for a run of bad tiles; here an error after a tile has decoded fails the search, as the contract asks. A payload with no `records` list fails its tile in both, here through a check rather than the `TypeError` the reference's `.map` throws. An async transport that cancels its own request, a deadline of its own, while the search itself was not cancelled, is a `transport` failure whose error is `TimeoutError("transport cancelled its own request")` with the `CancelledError` as its `__cause__`: §4.4 lets a port report the error of its choosing, and a `CancelledError` is not an `Exception`, which `error` is typed as.
 
 ## Ordering a NaN distance (contract §8)
 
