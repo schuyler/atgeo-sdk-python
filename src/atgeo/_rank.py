@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable
+from types import MappingProxyType
 
 from ._locations import Located, distance_to, locate, record_key
 from ._region import center
@@ -84,7 +85,7 @@ def rank(records: Iterable[TileRecord], region: Region, query: str, sort: SortMo
         assert distance is not None  # the region filter already required a location
         hit = SearchHit(
             origin=record_key(record.value, record.uri),
-            place=record.value,
+            place=MappingProxyType(record.value),  # a read-only view of the cache's own dict, not a copy
             importance=record.importance,
             distance=distance,
             score=score,

@@ -3,8 +3,12 @@ test_wire.py."""
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
+import json
 import urllib.parse
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
@@ -194,7 +198,8 @@ class TestParsedTileMemo:
         _, client = setup(make)
         first = client.search_places(REGION).places
         second = client.search_places(REGION, text="alpha").places
-        assert any(a.place is b.place for a in first for b in second)
+        # Each hit wraps the place in its own read-only view, over the memo's dict: its contents are shared.
+        assert any(a.place["locations"] is b.place["locations"] for a in first for b in second)
 
     def test_does_not_answer_for_a_tile_the_cache_evicted(self, make: Make) -> None:
         # A budget below one tile evicts it at once: the memo holds it, but must not stand in for the cache.
@@ -203,3 +208,77 @@ class TestParsedTileMemo:
         client.search_places(REGION)
         client.search_places(REGION)
         assert fake.requests.count(tile_url("a")) == 2
+
+
+class TestReadOnlyPlace:
+    """No reference counterpart: a place is a read-only view of the cache's own dict, so a mutation fails at
+    the line that made it instead of changing what the next search returns."""
+
+    @staticmethod
+    def assert_read_only(value: Mapping[str, Any]) -> None:
+        assert isinstance(value, Mapping)
+        assert type(value) is not dict
+        with pytest.raises(TypeError):
+            value["name"] = "Changed"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            value["added"] = 1  # type: ignore[index]
+        with pytest.raises(TypeError):
+            del value["name"]  # type: ignore[attr-defined]
+        assert not hasattr(value, "setdefault")
+        assert not hasattr(value, "update")
+
+    def test_rejects_a_top_level_assignment_to_a_hit(self, make: Make) -> None:
+        _, client = setup(make)
+        hits = client.search_places(REGION).places
+        assert hits
+        for hit in hits:
+            self.assert_read_only(hit.place)
+
+    def test_leaves_a_later_search_over_the_same_tile_unchanged(self, make: Make) -> None:
+        _, client = setup(make)
+        before = {h.origin: copy.deepcopy(dict(h.place)) for h in client.search_places(REGION).places}
+        assert before
+        for hit in client.search_places(REGION).places:
+            with pytest.raises(TypeError):
+                hit.place["name"] = "Changed"  # type: ignore[index]
+            with pytest.raises(TypeError):
+                del hit.place["name"]  # type: ignore[attr-defined]
+        after = client.search_places(REGION, text="Alpha").places
+        assert after
+        assert all(dict(h.place) == before[h.origin] for h in after)
+        assert {h.origin: dict(h.place) for h in client.search_places(REGION).places} == before
+
+    def test_shares_the_cached_dict_rather_than_copying_it(self, make: Make) -> None:
+        _, client = setup(make)
+        first = client.search_places(REGION).places
+        second = client.search_places(REGION, text="alpha").places
+        # Each hit has its own view, over the one dict the memo holds, so what is inside is the same objects.
+        assert any(a.place["locations"] is b.place["locations"] for a in first for b in second)
+
+    def test_returns_a_read_only_place_from_get_place_in_the_cache(self, make: Make) -> None:
+        fake, client = setup(make)
+        client.search_places(REGION)
+        before = len(fake.requests)
+        found = client.get_place(place_origin("a"))
+        assert len(fake.requests) == before  # answered from the cache
+        self.assert_read_only(found.place)
+        assert client.get_place(place_origin("a")).place["name"] == "Alpha"
+
+    def test_returns_a_read_only_place_from_get_place_on_the_network(self, make: Make) -> None:
+        fake, _ = setup(make)
+        found = make(fake).get_place(place_origin("a"))  # a cold client: nothing cached
+        assert "org.atgeo.getPlace" in fake.requests[-1]
+        self.assert_read_only(found.place)
+        assert found.place["name"] == "Alpha"
+
+    def test_serialises_and_copies_through_a_dict(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        with pytest.raises(TypeError):
+            json.dumps(hit.place)
+        with pytest.raises(TypeError):
+            copy.deepcopy(hit.place)
+        assert json.loads(json.dumps(dict(hit.place))) == hit.place
+        editable = copy.deepcopy(dict(hit.place))
+        editable["locations"].append("changed")
+        assert "changed" not in hit.place["locations"]

@@ -81,8 +81,12 @@ class TileCounts:
 class SearchHit:
     """One place a search found.
 
-    ``place`` is the record value exactly as served, and is shared with the client's cache:
-    treat it as read-only, and copy it before changing it.
+    ``place`` is the record value exactly as served, in a read-only :class:`types.MappingProxyType` over
+    the very dict in the client's cache, not a copy. Assigning to or deleting one of its keys raises
+    ``TypeError``, and ``type(hit.place) is dict`` is false. Only the top level is guarded: the lists and
+    dicts inside it are the cache's own and still mutable, so copy with ``copy.deepcopy(dict(hit.place))``
+    before changing any of it (``copy.deepcopy(hit.place)`` itself raises ``TypeError``, and ``dict(hit.place)``
+    alone is a top-level copy, enough for ``json.dumps``).
     """
 
     origin: str | None
@@ -142,7 +146,7 @@ class SearchResult:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PlaceRecord:
-    """One place by origin. ``place`` is read-only, as on :class:`SearchHit`."""
+    """One place by origin. ``place`` is a read-only mapping, as on :class:`SearchHit`."""
 
     origin: str
     place: Mapping[str, Any]
