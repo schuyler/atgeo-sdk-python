@@ -9,7 +9,7 @@ from ._locations import Located, distance_to, locate, record_key
 from ._region import center
 from ._text import JW_THRESHOLD, text_score, utf16
 from ._wire import TileRecord
-from .types import Region, SearchHit, SortMode
+from .types import Region, SearchHit, SortMode, _ReadOnlyMapping
 
 _RAD = math.pi / 180
 
@@ -84,7 +84,7 @@ def rank(records: Iterable[TileRecord], region: Region, query: str, sort: SortMo
         assert distance is not None  # the region filter already required a location
         hit = SearchHit(
             origin=record_key(record.value, record.uri),
-            place=record.value,
+            place=_ReadOnlyMapping(record.value),  # a read-only view of the cache's own dict, not a copy
             importance=record.importance,
             distance=distance,
             score=score,

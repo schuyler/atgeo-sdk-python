@@ -50,6 +50,7 @@ from .types import (
     TileFailure,
     TileFailureKind,
     Tileset,
+    _ReadOnlyMapping,
 )
 
 DEFAULT_SERVER = "https://places.atgeo.org"
@@ -309,7 +310,7 @@ class Engine:
         _, records = self.parsed(*found)
         for r in records:
             if record_key(r.value, r.uri) == origin:
-                return PlaceRecord(origin=origin, place=r.value, importance=r.importance)
+                return PlaceRecord(origin=origin, place=_ReadOnlyMapping(r.value), importance=r.importance)
         return None  # unreachable: the entry's key set came from these records
 
     def place_url(self, origin: str) -> str:
@@ -317,7 +318,9 @@ class Engine:
 
     def read_place(self, origin: str, response: HttpResponse) -> PlaceRecord:
         record, importance = read_place(self.body_of(response))
-        return PlaceRecord(origin=origin, place=record, importance=importance)  # the caller's origin, not uri
+        # The caller's origin, not uri. Read-only like every other place handed out, though this dict is the
+        # caller's alone: a place is the same kind of value whichever way it arrived.
+        return PlaceRecord(origin=origin, place=_ReadOnlyMapping(record), importance=importance)
 
     def cached_service(self) -> ServiceDescription | None:
         with self._lock:

@@ -118,7 +118,7 @@ class TileFailure:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchHit:
     origin: str | None  # place["origin"], else the tile record's uri, else None
-    place: Mapping[str, Any]  # the record value, exactly as served
+    place: Mapping[str, Any]  # the record value, exactly as served; a read-only view of the cached dict
     importance: int | None  # relative to its tileset; None if it has none
     distance: float  # metres from the region's centre to the nearest point of the place; 0 if it contains the centre
     score: float | None  # 0 to 1 text similarity; None without text
@@ -129,7 +129,18 @@ class SearchHit:
 
 `error` is a live exception, so `dataclasses.asdict(result)` copies it along with everything else, and `json.dumps` of that fails once a tile has failed. To serialize a result, take `url`, `kind` and `status` from each entry of `tile_failures` and leave `error` out, as `==` does.
 
-`place` is the dict `json.loads` made of the gazetteer's record, every key in served order and every integer exact. **Don't change it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is the dict in that memo, so a change would show up in the next search. Copy it first with `copy.deepcopy(hit.place)` if you need to (`dict(hit.place)` copies only the top level, so its nested lists and dicts are still the cache's); copying every place by default would cost three times what parsing does. It's annotated `Mapping`, so a type checker catches the mistake.
+`place` is the gazetteer's record as `json.loads` made it, every key in served order and every integer exact, behind a read-only mapping. **Don't change what's inside it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is a view of the dict in that memo, not a copy, so a change would show up in the next search. Copying every place by default would cost three times what parsing does, so the view is what you get. `hit.place["name"] = "x"` and `del hit.place["name"]` raise `TypeError` at the offending line, `hit.place.setdefault(...)`, `.update(...)` and `.pop(...)` raise `AttributeError` (the view has no such methods), and a type checker objects too, since the field is annotated `Mapping`. `get_place` returns the same kind of view, whether the place came from a cached tile or from the server.
+
+Only the top level is guarded. The lists and dicts inside `place` are still the cache's own, so `hit.place["locations"].append(...)` goes through. To change anything, copy first with `copy.deepcopy(hit.place)`, which gives you a plain, mutable `dict`. `hit.place.copy()` (the fast way to a mutable dict), `dict(hit.place)` and `copy.copy(hit.place)` copy only the top level, so their nested lists and dicts are still the cache's.
+
+The view is not a `dict`, and these are the differences:
+
+- `type(hit.place) is dict` and `isinstance(hit.place, dict)` are false (`isinstance(hit.place, Mapping)` is true).
+- It has no `__setitem__`, `__delitem__`, `setdefault`, `update`, `pop`, `popitem` or `clear`. Item assignment and deletion raise `TypeError`, the methods `AttributeError`.
+- `hit.place | other` and `reversed(hit.place)` aren't supported.
+- `json.dumps(hit.place)` raises `TypeError: Object of type _ReadOnlyMapping is not JSON serializable`. Write `json.dumps(hit.place.copy())`; the nested values are plain dicts and lists, so a top-level copy is all `json` needs.
+
+What it shares with a dict: `==` in both directions (`hit.place == some_dict` and `some_dict == hit.place` compare contents), `get`, `in`, `len`, `bool`, iteration in served order, and `keys()`, `items()` and `values()` (the wrapped dict's own read-only views). `hit.place.copy()` and `copy.copy(hit.place)` give a mutable top-level `dict`, and `copy.deepcopy(hit.place)` a deep, plain one. `pickle` and `dataclasses.asdict` work on a hit, a place record or a whole result, so a result crosses a process boundary and `json.dumps(dataclasses.asdict(result))` writes its places (the `error` caveat above still applies). `asdict` and `deepcopy` turn each place into a plain dict; a pickle round-trips to the view.
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
@@ -141,7 +152,7 @@ The result types are frozen, keyword-only dataclasses. You can construct them fo
 
 ### `get_place(origin) -> PlaceRecord`
 
-Returns `PlaceRecord(origin, place, importance)` for the `origin` of a hit, with the same `name` and `location`. If a cached tile holds the place, no request is made; otherwise the client asks the server directly.
+Returns `PlaceRecord(origin, place, importance)` for the `origin` of a hit, with the same `name`, `location` and read-only `place`. If a cached tile holds the place, no request is made; otherwise the client asks the server directly.
 
 ### `describe_service() -> ServiceDescription`
 

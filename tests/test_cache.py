@@ -3,12 +3,24 @@ test_wire.py."""
 
 from __future__ import annotations
 
+import collections
+import concurrent.futures
+import copy
+import dataclasses
 import datetime as dt
+import json
+import multiprocessing
+import operator
+import pickle
+import types
 import urllib.parse
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
-from atgeo import Bbox, PlaceRecord
+from atgeo import Bbox, PlaceRecord, SearchHit, SearchResult
+from atgeo.types import _ReadOnlyMapping
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, FakeTileset, overture
@@ -194,7 +206,8 @@ class TestParsedTileMemo:
         _, client = setup(make)
         first = client.search_places(REGION).places
         second = client.search_places(REGION, text="alpha").places
-        assert any(a.place is b.place for a in first for b in second)
+        # Each hit wraps the place in its own read-only view, over the memo's dict: its contents are shared.
+        assert any(a.place["locations"] is b.place["locations"] for a in first for b in second)
 
     def test_does_not_answer_for_a_tile_the_cache_evicted(self, make: Make) -> None:
         # A budget below one tile evicts it at once: the memo holds it, but must not stand in for the cache.
@@ -203,3 +216,236 @@ class TestParsedTileMemo:
         client.search_places(REGION)
         client.search_places(REGION)
         assert fake.requests.count(tile_url("a")) == 2
+
+
+class TestReadOnlyPlace:
+    """No reference counterpart: a place is a read-only view of the cache's own dict, so a mutation fails at
+    the line that made it instead of changing what the next search returns."""
+
+    @staticmethod
+    def assert_read_only(value: Mapping[str, Any]) -> None:
+        assert isinstance(value, Mapping)
+        assert type(value) is not dict
+        with pytest.raises(TypeError):
+            value["name"] = "Changed"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            value["added"] = 1  # type: ignore[index]
+        with pytest.raises(TypeError):
+            del value["name"]  # type: ignore[attr-defined]
+        assert not hasattr(value, "setdefault")
+        assert not hasattr(value, "update")
+
+    def test_rejects_a_top_level_assignment_to_a_hit(self, make: Make) -> None:
+        _, client = setup(make)
+        hits = client.search_places(REGION).places
+        assert hits
+        for hit in hits:
+            self.assert_read_only(hit.place)
+
+    def test_leaves_a_later_search_over_the_same_tile_unchanged(self, make: Make) -> None:
+        _, client = setup(make)
+        before = {h.origin: copy.deepcopy(dict(h.place)) for h in client.search_places(REGION).places}
+        assert before
+        for hit in client.search_places(REGION).places:
+            with pytest.raises(TypeError):
+                hit.place["name"] = "Changed"  # type: ignore[index]
+            with pytest.raises(TypeError):
+                del hit.place["name"]  # type: ignore[attr-defined]
+        after = client.search_places(REGION, text="Alpha").places
+        assert after
+        assert all(dict(h.place) == before[h.origin] for h in after)
+        assert {h.origin: dict(h.place) for h in client.search_places(REGION).places} == before
+
+    def test_shares_the_cached_dict_rather_than_copying_it(self, make: Make) -> None:
+        _, client = setup(make)
+        first = client.search_places(REGION).places
+        second = client.search_places(REGION, text="alpha").places
+        # Each hit has its own view, over the one dict the memo holds, so what is inside is the same objects.
+        assert any(a.place["locations"] is b.place["locations"] for a in first for b in second)
+
+    def test_returns_a_read_only_place_from_get_place_in_the_cache(self, make: Make) -> None:
+        fake, client = setup(make)
+        client.search_places(REGION)
+        before = len(fake.requests)
+        found = client.get_place(place_origin("a"))
+        assert len(fake.requests) == before  # answered from the cache
+        self.assert_read_only(found.place)
+        assert client.get_place(place_origin("a")).place["name"] == "Alpha"
+
+    def test_returns_a_read_only_place_from_get_place_on_the_network(self, make: Make) -> None:
+        fake, _ = setup(make)
+        found = make(fake).get_place(place_origin("a"))  # a cold client: nothing cached
+        assert "org.atgeo.getPlace" in fake.requests[-1]
+        self.assert_read_only(found.place)
+        assert found.place["name"] == "Alpha"
+
+    def test_serialises_through_a_dict_copy_only(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        with pytest.raises(TypeError):
+            json.dumps(hit.place)
+        assert json.loads(json.dumps(dict(hit.place))) == hit.place
+
+    def test_compares_equal_to_a_plain_dict_both_ways(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        plain = dict(hit.place)
+        assert hit.place == plain
+        assert plain == hit.place
+        assert operator.ne(hit.place, plain) is False
+        assert operator.ne(plain, hit.place) is False
+        assert hit.place != {**plain, "name": "Other"}
+        assert {**plain, "name": "Other"} != hit.place
+        assert repr(hit.place) == repr(plain)
+
+
+class TestPlaceAsMapping:
+    """What a place does as a dict does, and what it hands back as a plain one."""
+
+    def test_reads_like_a_dict(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        plain = dict(hit.place)
+        assert hit.place.get("name") == plain["name"]
+        assert hit.place.get("missing") is None
+        assert hit.place.get("missing", 7) == 7
+        assert "name" in hit.place
+        assert "missing" not in hit.place
+        assert 3 not in hit.place  # type: ignore[comparison-overlap]
+        assert len(hit.place) == len(plain)
+        assert list(hit.place) == list(plain)
+        assert list(hit.place.items()) == list(plain.items())
+        assert bool(hit.place)
+
+    def test_is_falsy_when_empty(self) -> None:
+        empty = _ReadOnlyMapping({})
+        assert not empty
+        assert len(empty) == 0
+        assert empty == {}
+        assert empty == {}
+
+    @pytest.mark.parametrize(
+        "make_other",
+        [types.MappingProxyType, collections.UserDict, collections.OrderedDict, lambda d: collections.ChainMap(d, {})],
+        ids=["MappingProxyType", "UserDict", "OrderedDict", "ChainMap"],
+    )
+    def test_compares_by_contents_with_any_mapping(self, make_other: Any) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        view = _ReadOnlyMapping(value)
+        same, different = make_other(dict(value)), make_other({**value, "name": "Other"})
+        assert view == same
+        assert same == view
+        assert operator.ne(view, same) is False
+        assert operator.ne(same, view) is False
+        assert view != different
+        assert different != view
+
+    def test_compares_by_contents_with_a_view_over_a_non_dict_mapping(self) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        over_proxy = _ReadOnlyMapping(types.MappingProxyType(value))
+        assert over_proxy == value
+        assert value == over_proxy
+        assert over_proxy == _ReadOnlyMapping(value)
+        assert _ReadOnlyMapping(value) == over_proxy
+        assert over_proxy != _ReadOnlyMapping({})
+        assert over_proxy.get("name") == "Alpha"
+        assert "name" in over_proxy
+        assert list(over_proxy.items()) == list(value.items())
+
+    @pytest.mark.parametrize("other", [None, [], ["name"], 3, "name"], ids=repr)
+    def test_is_not_equal_to_a_non_mapping(self, other: object) -> None:
+        view = _ReadOnlyMapping({"name": "x"})
+        assert operator.eq(view, other) is False
+        assert operator.eq(other, view) is False
+        assert operator.ne(view, other) is True
+        assert operator.ne(other, view) is True
+
+    def test_is_unhashable(self) -> None:
+        with pytest.raises(TypeError):
+            hash(_ReadOnlyMapping({"name": "x"}))
+
+    def test_keys_items_and_values_are_the_dicts_own_views(self) -> None:
+        value = {"a": 1, "b": [2]}
+        view = _ReadOnlyMapping(value)
+        assert view.keys() == value.keys()
+        assert view.items() == value.items()
+        assert list(view.values()) == list(value.values())
+        assert type(view.keys()) is type(value.keys())
+
+    def test_copy_methods_give_a_mutable_plain_dict_that_leaves_the_cache_alone(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        before = copy.deepcopy(dict(hit.place))
+        for copied in (hit.place.copy(), copy.copy(hit.place)):  # type: ignore[attr-defined]
+            assert type(copied) is dict
+            assert copied == hit.place
+            copied["name"] = "Changed"
+            copied["added"] = 1
+            del copied["origin"]
+        assert dict(client.search_places(REGION).places[0].place) == before
+        assert hit.place == before
+
+    def test_a_user_built_hit_or_record_holding_a_plain_dict_works(self) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        hit = SearchHit(origin=place_origin("a"), place=value, importance=1, distance=0.0, score=None)
+        found = PlaceRecord(origin=place_origin("a"), place=value, importance=1)
+        for held in (hit, found):
+            assert held.name == "Alpha"
+            assert held.location.point is not None
+            assert held.place is value
+            assert pickle.loads(pickle.dumps(held)) == held
+            assert copy.deepcopy(held) == held
+            assert dataclasses.asdict(held)["place"] == value
+        assert hit == SearchHit(
+            origin=place_origin("a"), place=_ReadOnlyMapping(value), importance=1, distance=0.0, score=None
+        )
+
+
+def roundtrips(make: Make) -> tuple[SearchResult, PlaceRecord]:
+    _, client = setup(make)
+    result = client.search_places(REGION)
+    assert result.places
+    return result, client.get_place(place_origin("a"))
+
+
+class TestPlaceCopies:
+    """A place is read-only, but a hit, a place record and a result still copy and pickle like plain data."""
+
+    def test_as_dict_yields_plain_dicts_that_json_can_write(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        as_dict = dataclasses.asdict(result)
+        assert all(type(h["place"]) is dict for h in as_dict["places"])
+        assert [h["place"] for h in as_dict["places"]] == [dict(h.place) for h in result.places]
+        assert json.loads(json.dumps(as_dict))["places"][0]["place"] == dict(result.places[0].place)
+        assert type(dataclasses.asdict(record)["place"]) is dict
+
+    def test_deepcopy_is_equal_and_independent(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        for original in (result, result.places[0], record):
+            copied = copy.deepcopy(original)
+            assert copied == original
+        hit = result.places[0]
+        plain = copy.deepcopy(hit.place)
+        assert type(plain) is dict
+        plain["locations"].append("changed")
+        plain["name"] = "Changed"
+        assert "changed" not in hit.place["locations"]
+        assert hit.place["name"] != "Changed"
+        assert copy.deepcopy(record.place) == record.place
+
+    def test_pickle_round_trips_a_result_a_hit_and_a_record(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        for original in (result, result.places[0], record):
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+                loaded = pickle.loads(pickle.dumps(original, protocol))
+                assert loaded == original
+        loaded_hit = pickle.loads(pickle.dumps(result.places[0]))
+        with pytest.raises(TypeError):
+            loaded_hit.place["name"] = "Changed"
+
+    def test_crosses_a_process_boundary(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        context = multiprocessing.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+            assert pool.submit(copy.deepcopy, result).result(timeout=60) == result
+            assert pool.submit(pickle.loads, pickle.dumps(record)).result(timeout=60) == record

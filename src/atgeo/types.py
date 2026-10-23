@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import copy
+from collections.abc import ItemsView, Iterator, KeysView, Mapping, ValuesView
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -77,12 +78,91 @@ class TileCounts:
     failed: int
 
 
+class _ReadOnlyMapping(Mapping[str, Any]):
+    """A place's top level, read-only, over the dict the client's cache holds (not a copy).
+
+    What a caller gets as ``hit.place``, annotated plain ``Mapping``. It is not a ``dict``: ``type(place)
+    is dict`` and ``isinstance(place, dict)`` are false, there is no ``__setitem__``, ``__delitem__``,
+    ``setdefault``, ``update``, ``pop``, ``popitem`` or ``clear`` (item assignment and deletion raise
+    ``TypeError``, the methods ``AttributeError``), ``|`` and ``reversed()`` are unsupported, and
+    ``json.dumps`` needs ``place.copy()``. Nested values are the cache's own, and still mutable.
+
+    What it shares with a dict: ``==`` both ways, ``get``, ``in``, ``len``, iteration in served order,
+    ``bool``, and ``keys()``, ``items()`` and ``values()``, which are the wrapped dict's own read-only
+    views. ``place.copy()`` and ``copy.copy(place)`` are a mutable top-level ``dict``,
+    ``copy.deepcopy(place)`` (so ``dataclasses.asdict`` of a hit or result) a deep, plain one, and a pickle
+    round-trips to another view.
+    """
+
+    __slots__ = ("_d",)
+
+    def __init__(self, d: Mapping[str, Any]) -> None:
+        self._d = d
+
+    def __getitem__(self, key: str) -> Any:
+        return self._d[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._d)
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+    # Delegated, so these skip the Mapping mixins' per-call overhead.
+    def __contains__(self, key: object) -> bool:
+        return key in self._d
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._d.get(key, default)
+
+    # The wrapped dict's own views: read-only, and no copy.
+    def keys(self) -> KeysView[str]:
+        return self._d.keys()
+
+    def items(self) -> ItemsView[str, Any]:
+        return self._d.items()
+
+    def values(self) -> ValuesView[Any]:
+        return self._d.values()
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _ReadOnlyMapping):
+            other = other._d
+        if isinstance(other, dict):
+            return self._d == other
+        if isinstance(other, Mapping):
+            return self._d == dict(other.items())
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]  # defining __eq__ resets it; a mapping is unhashable
+
+    def __repr__(self) -> str:
+        return repr(self._d)
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self._d)  # a mutable top-level copy, as a dict's own copy()
+
+    def __copy__(self) -> dict[str, Any]:
+        return dict(self._d)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+        return copy.deepcopy(self._d, memo)  # a plain, mutable dict, so asdict(result) is all plain data
+
+    def __reduce__(self) -> tuple[type[_ReadOnlyMapping], tuple[Mapping[str, Any]]]:
+        return (_ReadOnlyMapping, (self._d,))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchHit:
     """One place a search found.
 
-    ``place`` is the record value exactly as served, and is shared with the client's cache:
-    treat it as read-only, and copy it before changing it.
+    ``place`` is the record value exactly as served, as a read-only mapping over the very dict in the
+    client's cache, not a copy. Assigning to or deleting one of its keys raises ``TypeError``, and
+    ``type(hit.place) is dict`` is false. Only the top level is guarded: the lists and dicts inside it are
+    the cache's own and still mutable, so ``copy.deepcopy(hit.place)`` before changing any of it; that gives
+    a plain dict. ``hit.place.copy()`` is a fast top-level copy (a mutable ``dict``), which is all
+    ``json.dumps`` needs (it does not take ``hit.place`` itself). ``dataclasses.asdict``,
+    ``copy.deepcopy`` and ``pickle`` of a hit work.
     """
 
     origin: str | None
@@ -142,7 +222,7 @@ class SearchResult:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PlaceRecord:
-    """One place by origin. ``place`` is read-only, as on :class:`SearchHit`."""
+    """One place by origin. ``place`` is a read-only mapping, as on :class:`SearchHit`."""
 
     origin: str
     place: Mapping[str, Any]
