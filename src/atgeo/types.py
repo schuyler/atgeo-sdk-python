@@ -81,13 +81,17 @@ class TileCounts:
 class _ReadOnlyMapping(Mapping[str, Any]):
     """A place's top level, read-only, over the dict the client's cache holds (not a copy).
 
-    What a caller gets as ``hit.place``, annotated plain ``Mapping``. It has no ``__setitem__``, so item
-    assignment and deletion raise ``TypeError``, and no ``update``, ``setdefault`` or ``pop``. Nested values
-    are the cache's own.
+    What a caller gets as ``hit.place``, annotated plain ``Mapping``. It is not a ``dict``: ``type(place)
+    is dict`` and ``isinstance(place, dict)`` are false, there is no ``__setitem__``, ``__delitem__``,
+    ``setdefault``, ``update``, ``pop``, ``popitem`` or ``clear`` (item assignment and deletion raise
+    ``TypeError``, the methods ``AttributeError``), ``|`` and ``reversed()`` are unsupported, ``keys()``,
+    ``items()`` and ``values()`` are the Mapping views, and ``json.dumps`` needs ``dict(place)``. Nested
+    values are the cache's own, and still mutable.
 
-    It compares with a dict both ways, and ``dataclasses.asdict``, ``copy.deepcopy`` and ``pickle`` work on a
-    hit or a result: a deep copy is a plain, mutable ``dict``, and a pickle round-trips to another view.
-    ``json.dumps`` does not take it; give it ``dict(place)``.
+    What works as on a dict: ``==`` both ways, ``get``, ``in``, ``len``, iteration in served order, and
+    ``bool``. ``place.copy()`` and ``copy.copy(place)`` are a mutable top-level ``dict``,
+    ``copy.deepcopy(place)`` (so ``dataclasses.asdict`` of a hit or result) a deep, plain one, and a pickle
+    round-trips to another view.
     """
 
     __slots__ = ("_d",)
@@ -104,8 +108,32 @@ class _ReadOnlyMapping(Mapping[str, Any]):
     def __len__(self) -> int:
         return len(self._d)
 
+    # Delegated, so these skip the Mapping mixins' per-call overhead.
+    def __contains__(self, key: object) -> bool:
+        return key in self._d
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._d.get(key, default)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _ReadOnlyMapping):
+            other = other._d
+        if isinstance(other, dict):
+            return self._d == other
+        if isinstance(other, Mapping):
+            return dict(self._d) == dict(other.items())
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]  # defining __eq__ resets it; a mapping is unhashable
+
     def __repr__(self) -> str:
         return repr(self._d)
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self._d)  # a mutable top-level copy, as a dict's own copy()
+
+    def __copy__(self) -> dict[str, Any]:
+        return dict(self._d)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Any:
         return copy.deepcopy(self._d, memo)  # a plain, mutable dict, so asdict(result) is all plain data

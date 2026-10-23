@@ -131,11 +131,17 @@ class SearchHit:
 
 `place` is the gazetteer's record as `json.loads` made it, every key in served order and every integer exact, behind a read-only mapping. **Don't change what's inside it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is a view of the dict in that memo, not a copy, so a change would show up in the next search. Copying every place by default would cost three times what parsing does, so the view is what you get. `hit.place["name"] = "x"` and `del hit.place["name"]` raise `TypeError` at the offending line, `hit.place.setdefault(...)`, `.update(...)` and `.pop(...)` raise `AttributeError` (the view has no such methods), and a type checker objects too, since the field is annotated `Mapping`. `get_place` returns the same kind of view, whether the place came from a cached tile or from the server.
 
-Only the top level is guarded. The lists and dicts inside `place` are still the cache's own, so `hit.place["locations"].append(...)` goes through. To change anything, copy first with `copy.deepcopy(hit.place)`, which gives you a plain, mutable `dict` (`dict(hit.place)` copies only the top level, so its nested lists and dicts are still the cache's).
+Only the top level is guarded. The lists and dicts inside `place` are still the cache's own, so `hit.place["locations"].append(...)` goes through. To change anything, copy first with `copy.deepcopy(hit.place)`, which gives you a plain, mutable `dict`. `dict(hit.place)`, `hit.place.copy()` and `copy.copy(hit.place)` copy only the top level, so their nested lists and dicts are still the cache's.
 
-The view behaves like the dict it wraps in every other way. It reads, iterates and compares like one (`hit.place == some_dict` and `some_dict == hit.place` both compare contents), and `copy.deepcopy`, `pickle` and `dataclasses.asdict` work on a hit, a place record or a whole result, so a result crosses a process boundary and `json.dumps(dataclasses.asdict(result))` writes its places (the `error` caveat above still applies). `asdict` and `deepcopy` turn each place into a plain dict.
+The view is not a `dict`, and these are the differences:
 
-Two things change because it isn't a `dict`. `type(hit.place) is dict` is false (`isinstance(hit.place, Mapping)` is true), and `json.dumps(hit.place)` raises `TypeError: Object of type _ReadOnlyMapping is not JSON serializable`. Write `json.dumps(dict(hit.place))` instead; the nested values are plain dicts and lists, so a top-level copy is all `json` needs.
+- `type(hit.place) is dict` and `isinstance(hit.place, dict)` are false (`isinstance(hit.place, Mapping)` is true).
+- It has no `__setitem__`, `__delitem__`, `setdefault`, `update`, `pop`, `popitem` or `clear`. Item assignment and deletion raise `TypeError`, the methods `AttributeError`.
+- `hit.place | other` and `reversed(hit.place)` aren't supported.
+- `keys()`, `items()` and `values()` are `Mapping` views, not `dict`'s.
+- `json.dumps(hit.place)` raises `TypeError: Object of type _ReadOnlyMapping is not JSON serializable`. Write `json.dumps(dict(hit.place))`; the nested values are plain dicts and lists, so a top-level copy is all `json` needs.
+
+Everything else works as on a dict: `==` in both directions (`hit.place == some_dict` and `some_dict == hit.place` compare contents), `get`, `in`, `len`, `bool` and iteration in served order. `hit.place.copy()` and `copy.copy(hit.place)` give a mutable top-level `dict`, and `copy.deepcopy(hit.place)` a deep, plain one. `pickle` and `dataclasses.asdict` work on a hit, a place record or a whole result, so a result crosses a process boundary and `json.dumps(dataclasses.asdict(result))` writes its places (the `error` caveat above still applies). `asdict` and `deepcopy` turn each place into a plain dict; a pickle round-trips to the view.
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 

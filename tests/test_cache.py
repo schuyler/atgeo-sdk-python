@@ -8,6 +8,7 @@ import copy
 import dataclasses
 import datetime as dt
 import json
+import multiprocessing
 import operator
 import pickle
 import urllib.parse
@@ -16,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from atgeo import Bbox, PlaceRecord, SearchResult
+from atgeo import Bbox, PlaceRecord, SearchHit, SearchResult
+from atgeo.types import _ReadOnlyMapping
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, FakeTileset, overture
@@ -295,6 +297,60 @@ class TestReadOnlyPlace:
         assert repr(hit.place) == repr(plain)
 
 
+class TestPlaceAsMapping:
+    """What a place does as a dict does, and what it hands back as a plain one."""
+
+    def test_reads_like_a_dict(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        plain = dict(hit.place)
+        assert hit.place.get("name") == plain["name"]
+        assert hit.place.get("missing") is None
+        assert hit.place.get("missing", 7) == 7
+        assert "name" in hit.place
+        assert "missing" not in hit.place
+        assert 3 not in hit.place  # type: ignore[comparison-overlap]
+        assert len(hit.place) == len(plain)
+        assert list(hit.place) == list(plain)
+        assert list(hit.place.items()) == list(plain.items())
+        assert bool(hit.place)
+
+    def test_is_falsy_when_empty(self) -> None:
+        empty = _ReadOnlyMapping({})
+        assert not empty
+        assert len(empty) == 0
+        assert empty == {}
+        assert empty == {}
+
+    def test_copy_methods_give_a_mutable_plain_dict_that_leaves_the_cache_alone(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        before = copy.deepcopy(dict(hit.place))
+        for copied in (hit.place.copy(), copy.copy(hit.place)):  # type: ignore[attr-defined]
+            assert type(copied) is dict
+            assert copied == hit.place
+            copied["name"] = "Changed"
+            copied["added"] = 1
+            del copied["origin"]
+        assert dict(client.search_places(REGION).places[0].place) == before
+        assert hit.place == before
+
+    def test_a_user_built_hit_or_record_holding_a_plain_dict_works(self) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        hit = SearchHit(origin=place_origin("a"), place=value, importance=1, distance=0.0, score=None)
+        found = PlaceRecord(origin=place_origin("a"), place=value, importance=1)
+        for held in (hit, found):
+            assert held.name == "Alpha"
+            assert held.location.point is not None
+            assert held.place is value
+            assert pickle.loads(pickle.dumps(held)) == held
+            assert copy.deepcopy(held) == held
+            assert dataclasses.asdict(held)["place"] == value
+        assert hit == SearchHit(
+            origin=place_origin("a"), place=_ReadOnlyMapping(value), importance=1, distance=0.0, score=None
+        )
+
+
 def roundtrips(make: Make) -> tuple[SearchResult, PlaceRecord]:
     _, client = setup(make)
     result = client.search_places(REGION)
@@ -339,6 +395,7 @@ class TestPlaceCopies:
 
     def test_crosses_a_process_boundary(self, make: Make) -> None:
         result, record = roundtrips(make)
-        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as pool:
-            assert pool.submit(copy.copy, result).result() == result
-            assert pool.submit(copy.copy, record).result() == record
+        context = multiprocessing.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+            assert pool.submit(copy.deepcopy, result).result(timeout=60) == result
+            assert pool.submit(pickle.loads, pickle.dumps(record)).result(timeout=60) == record
