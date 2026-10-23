@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator, Mapping
+from collections.abc import ItemsView, Iterator, KeysView, Mapping, ValuesView
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -84,12 +84,12 @@ class _ReadOnlyMapping(Mapping[str, Any]):
     What a caller gets as ``hit.place``, annotated plain ``Mapping``. It is not a ``dict``: ``type(place)
     is dict`` and ``isinstance(place, dict)`` are false, there is no ``__setitem__``, ``__delitem__``,
     ``setdefault``, ``update``, ``pop``, ``popitem`` or ``clear`` (item assignment and deletion raise
-    ``TypeError``, the methods ``AttributeError``), ``|`` and ``reversed()`` are unsupported, ``keys()``,
-    ``items()`` and ``values()`` are the Mapping views, and ``json.dumps`` needs ``dict(place)``. Nested
-    values are the cache's own, and still mutable.
+    ``TypeError``, the methods ``AttributeError``), ``|`` and ``reversed()`` are unsupported, and
+    ``json.dumps`` needs ``place.copy()``. Nested values are the cache's own, and still mutable.
 
-    What works as on a dict: ``==`` both ways, ``get``, ``in``, ``len``, iteration in served order, and
-    ``bool``. ``place.copy()`` and ``copy.copy(place)`` are a mutable top-level ``dict``,
+    What it shares with a dict: ``==`` both ways, ``get``, ``in``, ``len``, iteration in served order,
+    ``bool``, and ``keys()``, ``items()`` and ``values()``, which are the wrapped dict's own read-only
+    views. ``place.copy()`` and ``copy.copy(place)`` are a mutable top-level ``dict``,
     ``copy.deepcopy(place)`` (so ``dataclasses.asdict`` of a hit or result) a deep, plain one, and a pickle
     round-trips to another view.
     """
@@ -115,13 +115,23 @@ class _ReadOnlyMapping(Mapping[str, Any]):
     def get(self, key: str, default: Any = None) -> Any:
         return self._d.get(key, default)
 
+    # The wrapped dict's own views: read-only, and no copy.
+    def keys(self) -> KeysView[str]:
+        return self._d.keys()
+
+    def items(self) -> ItemsView[str, Any]:
+        return self._d.items()
+
+    def values(self) -> ValuesView[Any]:
+        return self._d.values()
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, _ReadOnlyMapping):
             other = other._d
         if isinstance(other, dict):
             return self._d == other
         if isinstance(other, Mapping):
-            return dict(self._d) == dict(other.items())
+            return self._d == dict(other.items())
         return NotImplemented
 
     __hash__ = None  # type: ignore[assignment]  # defining __eq__ resets it; a mapping is unhashable
@@ -150,8 +160,9 @@ class SearchHit:
     client's cache, not a copy. Assigning to or deleting one of its keys raises ``TypeError``, and
     ``type(hit.place) is dict`` is false. Only the top level is guarded: the lists and dicts inside it are
     the cache's own and still mutable, so ``copy.deepcopy(hit.place)`` before changing any of it; that gives
-    a plain dict. ``dict(hit.place)`` is a top-level copy, which is all ``json.dumps`` needs (it does not
-    take ``hit.place`` itself). ``dataclasses.asdict``, ``copy.deepcopy`` and ``pickle`` of a hit work.
+    a plain dict. ``hit.place.copy()`` is a fast top-level copy (a mutable ``dict``), which is all
+    ``json.dumps`` needs (it does not take ``hit.place`` itself). ``dataclasses.asdict``,
+    ``copy.deepcopy`` and ``pickle`` of a hit work.
     """
 
     origin: str | None

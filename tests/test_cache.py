@@ -3,6 +3,7 @@ test_wire.py."""
 
 from __future__ import annotations
 
+import collections
 import concurrent.futures
 import copy
 import dataclasses
@@ -11,6 +12,7 @@ import json
 import multiprocessing
 import operator
 import pickle
+import types
 import urllib.parse
 from collections.abc import Mapping
 from typing import Any
@@ -321,6 +323,54 @@ class TestPlaceAsMapping:
         assert len(empty) == 0
         assert empty == {}
         assert empty == {}
+
+    @pytest.mark.parametrize(
+        "make_other",
+        [types.MappingProxyType, collections.UserDict, collections.OrderedDict, lambda d: collections.ChainMap(d, {})],
+        ids=["MappingProxyType", "UserDict", "OrderedDict", "ChainMap"],
+    )
+    def test_compares_by_contents_with_any_mapping(self, make_other: Any) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        view = _ReadOnlyMapping(value)
+        same, different = make_other(dict(value)), make_other({**value, "name": "Other"})
+        assert view == same
+        assert same == view
+        assert operator.ne(view, same) is False
+        assert operator.ne(same, view) is False
+        assert view != different
+        assert different != view
+
+    def test_compares_by_contents_with_a_view_over_a_non_dict_mapping(self) -> None:
+        value = place("a", "Alpha", [point(37.772, -122.412)])
+        over_proxy = _ReadOnlyMapping(types.MappingProxyType(value))
+        assert over_proxy == value
+        assert value == over_proxy
+        assert over_proxy == _ReadOnlyMapping(value)
+        assert _ReadOnlyMapping(value) == over_proxy
+        assert over_proxy != _ReadOnlyMapping({})
+        assert over_proxy.get("name") == "Alpha"
+        assert "name" in over_proxy
+        assert list(over_proxy.items()) == list(value.items())
+
+    @pytest.mark.parametrize("other", [None, [], ["name"], 3, "name"], ids=repr)
+    def test_is_not_equal_to_a_non_mapping(self, other: object) -> None:
+        view = _ReadOnlyMapping({"name": "x"})
+        assert operator.eq(view, other) is False
+        assert operator.eq(other, view) is False
+        assert operator.ne(view, other) is True
+        assert operator.ne(other, view) is True
+
+    def test_is_unhashable(self) -> None:
+        with pytest.raises(TypeError):
+            hash(_ReadOnlyMapping({"name": "x"}))
+
+    def test_keys_items_and_values_are_the_dicts_own_views(self) -> None:
+        value = {"a": 1, "b": [2]}
+        view = _ReadOnlyMapping(value)
+        assert view.keys() == value.keys()
+        assert view.items() == value.items()
+        assert list(view.values()) == list(value.values())
+        assert type(view.keys()) is type(value.keys())
 
     def test_copy_methods_give_a_mutable_plain_dict_that_leaves_the_cache_alone(self, make: Make) -> None:
         _, client = setup(make)
