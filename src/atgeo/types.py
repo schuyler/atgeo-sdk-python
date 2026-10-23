@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import copy
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -77,16 +78,52 @@ class TileCounts:
     failed: int
 
 
+class _ReadOnlyMapping(Mapping[str, Any]):
+    """A place's top level, read-only, over the dict the client's cache holds (not a copy).
+
+    What a caller gets as ``hit.place``, annotated plain ``Mapping``. It has no ``__setitem__``, so item
+    assignment and deletion raise ``TypeError``, and no ``update``, ``setdefault`` or ``pop``. Nested values
+    are the cache's own.
+
+    It compares with a dict both ways, and ``dataclasses.asdict``, ``copy.deepcopy`` and ``pickle`` work on a
+    hit or a result: a deep copy is a plain, mutable ``dict``, and a pickle round-trips to another view.
+    ``json.dumps`` does not take it; give it ``dict(place)``.
+    """
+
+    __slots__ = ("_d",)
+
+    def __init__(self, d: Mapping[str, Any]) -> None:
+        self._d = d
+
+    def __getitem__(self, key: str) -> Any:
+        return self._d[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._d)
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+    def __repr__(self) -> str:
+        return repr(self._d)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+        return copy.deepcopy(self._d, memo)  # a plain, mutable dict, so asdict(result) is all plain data
+
+    def __reduce__(self) -> tuple[type[_ReadOnlyMapping], tuple[Mapping[str, Any]]]:
+        return (_ReadOnlyMapping, (self._d,))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchHit:
     """One place a search found.
 
-    ``place`` is the record value exactly as served, in a read-only :class:`types.MappingProxyType` over
-    the very dict in the client's cache, not a copy. Assigning to or deleting one of its keys raises
-    ``TypeError``, and ``type(hit.place) is dict`` is false. Only the top level is guarded: the lists and
-    dicts inside it are the cache's own and still mutable, so copy with ``copy.deepcopy(dict(hit.place))``
-    before changing any of it (``copy.deepcopy(hit.place)`` itself raises ``TypeError``, and ``dict(hit.place)``
-    alone is a top-level copy, enough for ``json.dumps``).
+    ``place`` is the record value exactly as served, as a read-only mapping over the very dict in the
+    client's cache, not a copy. Assigning to or deleting one of its keys raises ``TypeError``, and
+    ``type(hit.place) is dict`` is false. Only the top level is guarded: the lists and dicts inside it are
+    the cache's own and still mutable, so ``copy.deepcopy(hit.place)`` before changing any of it; that gives
+    a plain dict. ``dict(hit.place)`` is a top-level copy, which is all ``json.dumps`` needs (it does not
+    take ``hit.place`` itself). ``dataclasses.asdict``, ``copy.deepcopy`` and ``pickle`` of a hit work.
     """
 
     origin: str | None

@@ -3,16 +3,20 @@ test_wire.py."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import copy
+import dataclasses
 import datetime as dt
 import json
+import operator
+import pickle
 import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
-from atgeo import Bbox, PlaceRecord
+from atgeo import Bbox, PlaceRecord, SearchResult
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, FakeTileset, overture
@@ -271,14 +275,70 @@ class TestReadOnlyPlace:
         self.assert_read_only(found.place)
         assert found.place["name"] == "Alpha"
 
-    def test_serialises_and_copies_through_a_dict(self, make: Make) -> None:
+    def test_serialises_through_a_dict_copy_only(self, make: Make) -> None:
         _, client = setup(make)
         hit = client.search_places(REGION).places[0]
         with pytest.raises(TypeError):
             json.dumps(hit.place)
-        with pytest.raises(TypeError):
-            copy.deepcopy(hit.place)
         assert json.loads(json.dumps(dict(hit.place))) == hit.place
-        editable = copy.deepcopy(dict(hit.place))
-        editable["locations"].append("changed")
+
+    def test_compares_equal_to_a_plain_dict_both_ways(self, make: Make) -> None:
+        _, client = setup(make)
+        hit = client.search_places(REGION).places[0]
+        plain = dict(hit.place)
+        assert hit.place == plain
+        assert plain == hit.place
+        assert operator.ne(hit.place, plain) is False
+        assert operator.ne(plain, hit.place) is False
+        assert hit.place != {**plain, "name": "Other"}
+        assert {**plain, "name": "Other"} != hit.place
+        assert repr(hit.place) == repr(plain)
+
+
+def roundtrips(make: Make) -> tuple[SearchResult, PlaceRecord]:
+    _, client = setup(make)
+    result = client.search_places(REGION)
+    assert result.places
+    return result, client.get_place(place_origin("a"))
+
+
+class TestPlaceCopies:
+    """A place is read-only, but a hit, a place record and a result still copy and pickle like plain data."""
+
+    def test_as_dict_yields_plain_dicts_that_json_can_write(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        as_dict = dataclasses.asdict(result)
+        assert all(type(h["place"]) is dict for h in as_dict["places"])
+        assert [h["place"] for h in as_dict["places"]] == [dict(h.place) for h in result.places]
+        assert json.loads(json.dumps(as_dict))["places"][0]["place"] == dict(result.places[0].place)
+        assert type(dataclasses.asdict(record)["place"]) is dict
+
+    def test_deepcopy_is_equal_and_independent(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        for original in (result, result.places[0], record):
+            copied = copy.deepcopy(original)
+            assert copied == original
+        hit = result.places[0]
+        plain = copy.deepcopy(hit.place)
+        assert type(plain) is dict
+        plain["locations"].append("changed")
+        plain["name"] = "Changed"
         assert "changed" not in hit.place["locations"]
+        assert hit.place["name"] != "Changed"
+        assert copy.deepcopy(record.place) == record.place
+
+    def test_pickle_round_trips_a_result_a_hit_and_a_record(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        for original in (result, result.places[0], record):
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+                loaded = pickle.loads(pickle.dumps(original, protocol))
+                assert loaded == original
+        loaded_hit = pickle.loads(pickle.dumps(result.places[0]))
+        with pytest.raises(TypeError):
+            loaded_hit.place["name"] = "Changed"
+
+    def test_crosses_a_process_boundary(self, make: Make) -> None:
+        result, record = roundtrips(make)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(copy.copy, result).result() == result
+            assert pool.submit(copy.copy, record).result() == record

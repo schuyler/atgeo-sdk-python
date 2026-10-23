@@ -118,7 +118,7 @@ class TileFailure:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchHit:
     origin: str | None  # place["origin"], else the tile record's uri, else None
-    place: Mapping[str, Any]  # the record value, exactly as served; a read-only view (a mappingproxy)
+    place: Mapping[str, Any]  # the record value, exactly as served; a read-only view of the cached dict
     importance: int | None  # relative to its tileset; None if it has none
     distance: float  # metres from the region's centre to the nearest point of the place; 0 if it contains the centre
     score: float | None  # 0 to 1 text similarity; None without text
@@ -129,13 +129,13 @@ class SearchHit:
 
 `error` is a live exception, so `dataclasses.asdict(result)` copies it along with everything else, and `json.dumps` of that fails once a tile has failed. To serialize a result, take `url`, `kind` and `status` from each entry of `tile_failures` and leave `error` out, as `==` does.
 
-`place` is also why `dataclasses.asdict`, `copy.deepcopy` and `pickle` raise `TypeError` on a `SearchHit`, a `PlaceRecord` or a `SearchResult` with places in it: a read-only view can't be copied. Build what you need from the fields, with `dict(hit.place)` for the place.
+`place` is the gazetteer's record as `json.loads` made it, every key in served order and every integer exact, behind a read-only mapping. **Don't change what's inside it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is a view of the dict in that memo, not a copy, so a change would show up in the next search. Copying every place by default would cost three times what parsing does, so the view is what you get. `hit.place["name"] = "x"` and `del hit.place["name"]` raise `TypeError` at the offending line, `hit.place.setdefault(...)`, `.update(...)` and `.pop(...)` raise `AttributeError` (the view has no such methods), and a type checker objects too, since the field is annotated `Mapping`. `get_place` returns the same kind of view, whether the place came from a cached tile or from the server.
 
-`place` is the gazetteer's record as `json.loads` made it, every key in served order and every integer exact, behind a read-only `types.MappingProxyType`. **Don't change what's inside it.** The client keeps the latest search's parsed tiles so that searching the same region with new text parses nothing, and `place` is a view of the dict in that memo, not a copy, so a change would show up in the next search. Copying every place by default would cost three times what parsing does, so the view is what you get: `hit.place["name"] = "x"` and `del hit.place["name"]` raise `TypeError` at the offending line, `hit.place.setdefault(...)` and `.update(...)` raise `AttributeError`, and a type checker objects too, since the field is annotated `Mapping`. `get_place` returns the same kind of view, whether the place came from a cached tile or from the server.
+Only the top level is guarded. The lists and dicts inside `place` are still the cache's own, so `hit.place["locations"].append(...)` goes through. To change anything, copy first with `copy.deepcopy(hit.place)`, which gives you a plain, mutable `dict` (`dict(hit.place)` copies only the top level, so its nested lists and dicts are still the cache's).
 
-Only the top level is guarded. The lists and dicts inside `place` are still the cache's own, so `hit.place["locations"].append(...)` goes through. To change anything, copy first with `copy.deepcopy(dict(hit.place))`. Note the `dict(...)`: `copy.deepcopy(hit.place)` itself raises `TypeError`, because a `mappingproxy` can't be copied, and `dict(hit.place)` alone copies only the top level, so its nested lists and dicts are still the cache's.
+The view behaves like the dict it wraps in every other way. It reads, iterates and compares like one (`hit.place == some_dict` and `some_dict == hit.place` both compare contents), and `copy.deepcopy`, `pickle` and `dataclasses.asdict` work on a hit, a place record or a whole result, so a result crosses a process boundary and `json.dumps(dataclasses.asdict(result))` writes its places (the `error` caveat above still applies). `asdict` and `deepcopy` turn each place into a plain dict.
 
-Because it's a view, `type(hit.place) is dict` is false (`isinstance(hit.place, Mapping)` is true, and `==` against a dict compares contents), and `json.dumps(hit.place)` raises `TypeError: Object of type mappingproxy is not JSON serializable`. Use `json.dumps(dict(hit.place))`: the nested values are plain dicts and lists, so a top-level copy is all `json` needs.
+Two things change because it isn't a `dict`. `type(hit.place) is dict` is false (`isinstance(hit.place, Mapping)` is true), and `json.dumps(hit.place)` raises `TypeError: Object of type _ReadOnlyMapping is not JSON serializable`. Write `json.dumps(dict(hit.place))` instead; the nested values are plain dicts and lists, so a top-level copy is all `json` needs.
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
