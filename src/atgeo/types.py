@@ -163,6 +163,9 @@ class SearchHit:
     a plain dict. ``hit.place.copy()`` is a fast top-level copy (a mutable ``dict``), which is all
     ``json.dumps`` needs (it does not take ``hit.place`` itself). ``dataclasses.asdict``,
     ``copy.deepcopy`` and ``pickle`` of a hit work.
+
+    ``collection`` is the collection ``origin`` names, found in the attribution of the tile the record came from
+    (contract §8): a frozen pair, or None when nothing matches.
     """
 
     origin: str | None

@@ -10,13 +10,21 @@ It's a port of [@atgeo/client](https://github.com/schuyler/atgeo-sdk-js) and ret
 from atgeo import AtgeoClient, Circle
 
 with AtgeoClient() as atgeo:
-    result = atgeo.search_places(Circle(lat=39.9526, lon=-75.1652, radius=1000), text="Starbux")  # metres
+    result = atgeo.search_places(
+        Circle(lat=39.9526, lon=-75.1652, radius=1000),  # metres
+        dataset="overturemaps.org",
+        collection="place",
+        text="Starbux",
+    )
 
     for hit in result.places:
         print(hit.name, round(hit.distance), f"{hit.score:.2f}", hit.origin)
+
+    for credit in result.attribution:  # whose data these places are, and on what terms
+        print(credit.dataset, credit.collection, credit.licenses)
 ```
 
-Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
 
 The async version is the same with `await`:
 
@@ -27,7 +35,9 @@ from atgeo import AsyncAtgeoClient, Circle
 
 async def main() -> None:
     async with AsyncAtgeoClient() as atgeo:
-        result = await atgeo.search_places(Circle(39.9526, -75.1652, 1000), text="Starbux")
+        result = await atgeo.search_places(
+            Circle(39.9526, -75.1652, 1000), dataset="overturemaps.org", collection="place", text="Starbux"
+        )
         print(len(result.places))
 
 
@@ -83,19 +93,19 @@ If your app already has a configured `requests.Session` or uses httpx, copy [`ex
 
 The methods are the same on both clients; on `AsyncAtgeoClient` they're coroutines.
 
-### `search_places(region, *, text=None, dataset=None, collection=None, sort="fused") -> SearchResult`
+### `search_places(region, *, dataset, text=None, collection=None, sort="fused") -> SearchResult`
 
 | Argument | Meaning |
 |---|---|
-| `region` | Required. `Circle(lat, lon, radius)` with the radius in metres, or `Bbox(min_lon, min_lat, max_lon, max_lat)` in degrees. Note the order: a circle is latitude first, a box longitude first (GeoJSON's order), so name the arguments. A bbox with `min_lon > max_lon` crosses the antimeridian. |
+| `region` | Required. `Circle(lat, lon, radius)` with the radius in metres, or `Bbox(west, south, east, north)` in degrees. A circle is latitude first and a box longitude first (GeoJSON's order), so name the arguments. A bbox with `west > east` crosses the antimeridian. |
+| `dataset` | Required, such as `overturemaps.org`. There is no default. |
 | `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. |
-| `dataset` | Optional, such as `openstreetmap.org`. Defaults to `overturemaps.org`. |
-| `collection` | Optional, such as `way`. |
+| `collection` | Optional, such as `way`. Without it you search every collection of the dataset together. |
 | `sort` | `SortMode.FUSED` (default), `DISTANCE` or `SIMILARITY`, or the same as strings. |
 
 Everything after `region` is keyword-only, so `search_places(region, "Starbux")` is an error rather than a guess.
 
-With neither `dataset` nor `collection` you search `overturemaps.org` / `place`; with only `collection`, that collection of `overturemaps.org`; with only `dataset`, every collection of that dataset together; with both, that collection.
+A missing `dataset`, or one that isn't a `str` (`None`, a number, bytes), is a `TypeError` raised before any request and before the region is looked at; a `collection` without a `dataset` is the same error. An empty string is a dataset, and goes to the server as given. On the async client a missing argument fails at the call and a wrong-typed one when you `await` it.
 
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -105,6 +115,23 @@ class SearchResult:
     overview: bool  # True if the server answered with its coarse overview
     tiles: TileCounts  # fetched and failed
     tile_failures: tuple[TileFailure, ...]  # each failed tile, in tile URL order; () when complete
+    attribution: tuple[Attribution, ...]  # who to credit for the tiles used, one entry per collection; () if none
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Attribution:
+    dataset: str
+    collection: str
+    release: str | None  # the upstream's version string
+    source: str | None  # URL of the upstream dataset
+    licenses: tuple[str, ...] | None  # URLs of the licence texts
+    attribution: str | None  # URL of the upstream's attribution page
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollectionKey:
+    dataset: str
+    collection: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -122,10 +149,13 @@ class SearchHit:
     importance: int | None  # relative to its tileset; None if it has none
     distance: float  # metres from the region's centre to the nearest point of the place; 0 if it contains the centre
     score: float | None  # 0 to 1 text similarity; None without text
+    collection: CollectionKey | None  # the collection origin names, per the tile's attribution; None if none matches
 
     name: str | None  # property: place["name"] if it's a string
     location: PlaceLocation  # property: point and/or box, parsed as the client parsed them for distance
 ```
+
+`result.attribution` covers every tile the search used, including tiles whose records were all filtered out, and the reference collections a tileset lists for places that mention them (a hit's containing division, say), so show it wherever you show the places. It has one entry per `(dataset, collection)`, taken from the lowest tile URL when tiles disagree, sorted by dataset and then collection, and it's empty when no tile was used. A failed tile adds nothing. Entries are frozen and `licenses` is a tuple, so there's nothing to copy and nothing you can change in the cache. `hit.collection` is the first entry, in the tile's served order, whose `urn:atgeo:{dataset}:{collection}:` prefix starts the hit's `origin`, as a new `CollectionKey` with just those two fields. It's `None` when nothing matches, when the tile has no attribution, or when the hit is keyed by its `uri` instead of an `origin`.
 
 `error` is a live exception, so `dataclasses.asdict(result)` copies it along with everything else, and `json.dumps` of that fails once a tile has failed. To serialize a result, take `url`, `kind` and `status` from each entry of `tile_failures` and leave `error` out, as `==` does.
 
@@ -152,20 +182,20 @@ The result types are frozen, keyword-only dataclasses. You can construct them fo
 
 ### `get_place(origin) -> PlaceRecord`
 
-Returns `PlaceRecord(origin, place, importance)` for the `origin` of a hit, with the same `name`, `location` and read-only `place`. If a cached tile holds the place, no request is made; otherwise the client asks the server directly.
+Returns `PlaceRecord(origin, place, importance, attribution)` for the `origin` of a hit, with the same `name`, `location` and read-only `place`. If a cached tile holds the place, no request is made; otherwise the client asks the server directly. `attribution` is a tuple of `Attribution`, in the order it was served and not deduplicated or sorted: from the cache, the one the lowest-URL tile holding the place carried (empty if it has none), and from the server, the answer's own. It's empty, never `None`. The server's `getPlace` answer has to carry a `value`; the older `record`-only shape raises `AtgeoDecodingError`.
 
 ### `describe_service() -> ServiceDescription`
 
-The server's DID and the tilesets it serves. Cached for an hour.
+The server's DID, its `max_tiles` (the most regular tiles it will list before falling back to overview tiles; informational, since tile zooms adapt) and the tilesets it serves. Cached for an hour.
 
 ### `describe_tileset(slug) -> Tileset`
 
-A tileset's collections, attribution and extent. Not cached. The describe types are read leniently: a field that is missing or of the wrong type comes back `None`, never as an exception. Their field names are snake_case (`record_count`, `published_at`) and their lists are tuples.
+A tileset's collections, attribution and extent, and its `overview` (`TilesetOverview(records=...)`, `None` if it has no overview band). Not cached. The describe types are read leniently: a field that is missing or of the wrong type comes back `None`, never as an exception. Their field names are snake_case (`record_count`, `published_at`) and their lists are tuples.
 
 ### Errors
 
 - `AtgeoError` has the server's error `code` (`PlaceNotFound`, `BboxTooLarge`, `DatasetNotFound` and so on), or `HttpError` when the server didn't send one, a `message`, and the HTTP `status`. Use `status` to tell a request the server refused (4xx) from one it failed to answer (5xx); codes are an open list and new ones may appear.
-- `search_places` raises `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text, and `TypeError` for a region that isn't a `Circle` or a `Bbox`, before any request.
+- `search_places` raises `TypeError` for a missing or non-string `dataset`, checked first, and then for a region that isn't a `Circle` or a `Bbox`; and `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text. All of them come before any request.
 - A failed `getTiles` fails the search. A failed tile does not: it's skipped, listed in `tile_failures` and counted in `tiles.failed`, and `complete` is `False`. A tile's `kind` says where it went wrong: `REFUSED` is a tile URL that isn't absolute `http` or `https` or has credentials in it, and no request was made; `STATUS` a non-2xx, with its `status` and the `AtgeoError`; `DECODE` a 2xx whose body isn't a tile, with whatever the parser raised; `TRANSPORT` anything the transport raised, a timeout, a dropped connection, a body over the cap, or a bug in a transport of your own, which is why that one is a failed tile and not an exception. The kind, URL and status are the same in every atgeo SDK; `error` is Python's own, so two results compare equal without it.
 - An error in the client's own work after a tile has decoded, such as storing it in the cache, fails the search rather than passing for a bad tile. So does `MemoryError`, wherever it comes from.
 - Each failed tile is also logged on the `atgeo` logger at `DEBUG`, with its URL, kind, status and error and nothing else, never your search text or region. The tile URL does say roughly where you searched, about as precisely as the server already knows, so treat debug logs that way. The library adds no handler, as libraries shouldn't, so you see nothing until you ask: `logging.getLogger("atgeo").setLevel(logging.DEBUG)` with a handler configured, or `logging.basicConfig(level=logging.DEBUG)`. It never logs above `DEBUG`, so a search on every keystroke over a bad connection won't fill your logs, and it sends nothing anywhere.
@@ -206,7 +236,7 @@ uv run mypy
 ATGEO_SERVER=http://localhost:8000 uv run python scripts/e2e.py
 ```
 
-The end-to-end script runs both clients and takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one. `ATGEO_NETWORK_TESTS=1 uv run pytest -m network` runs the TLS tests against places.atgeo.org and badssl.com.
+The end-to-end script runs both clients, and needs a server that answers `getPlace` with `value` and `attribution` ([schuyler/garganorn#27](https://github.com/schuyler/garganorn/issues/27)); against an older garganorn it fails at `get_place`, which is the point. It takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one. `ATGEO_NETWORK_TESTS=1 uv run pytest -m network` runs the TLS tests against places.atgeo.org and badssl.com.
 
 `tests/fixtures/` holds the shared fixtures, copied from atgeo-sdk-js at the commit named in `SOURCE`, and the garganorn lexicons, with their own `SOURCE`.
 
