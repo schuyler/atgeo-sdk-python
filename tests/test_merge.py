@@ -10,7 +10,7 @@ from atgeo._region import haversine
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, FakeTileset, overture
-from .helpers import bbox_location, place, place_origin, point, record, tile_url
+from .helpers import OVERTURE, bbox_location, place, place_origin, point, record, tile_url
 
 url = tile_url
 
@@ -21,7 +21,7 @@ def id_of(origin: str | None) -> str:
 
 def search(make: Make, records: list[dict[str, Any]], region: Region) -> list[str]:
     fake = FakeServer(tilesets=[overture([FakeTile(url("t"), [record(v) for v in records])])])
-    return sorted(id_of(h.origin) for h in make(fake).search_places(region).places)
+    return sorted(id_of(h.origin) for h in make(fake).search_places(region, **OVERTURE).places)
 
 
 DIVISION = {"dataset": "overturemaps.org", "collection": "division"}
@@ -55,14 +55,14 @@ class TestDeduplication:
                 )
             ]
         )
-        result = make(fake).search_places(self.region)
+        result = make(fake).search_places(self.region, **OVERTURE)
         assert sorted(id_of(h.origin) for h in result.places) == ["a-only", "b-only", "dup"]
 
     def test_keeps_the_first_tiles_copy_in_the_default_order_too(self, make: Make) -> None:
         fake = FakeServer(
             tilesets=[overture([FakeTile(url("a"), [record(self.first)]), FakeTile(url("b"), [record(self.second)])])]
         )
-        assert [h.name for h in make(fake).search_places(self.region).places] == ["First copy"]
+        assert [h.name for h in make(fake).search_places(self.region, **OVERTURE).places] == ["First copy"]
 
     def test_merges_a_division_record_held_by_two_tiles_into_one_hit(self, make: Make) -> None:
         fake = FakeServer(
@@ -97,7 +97,7 @@ class TestDeduplication:
             ],
             tiles_for=lambda bbox: [url(east_name) if bbox.startswith("170") else url(west_name)],
         )
-        result = make(fake).search_places(Bbox(170, 10, -170, 20))
+        result = make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
         assert [h.name for h in result.places] == [winner]
 
     def test_keeps_two_records_that_have_neither_origin_nor_uri(self, make: Make) -> None:
@@ -134,14 +134,14 @@ class TestPipelineOrder:
                 )
             ]
         )
-        places = make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).places
+        places = make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places
         assert [h.place["name"] for h in places] == ["Low"]
 
     def test_dedupes_before_the_region_filter_so_an_outside_winner_drops_the_place(self, make: Make) -> None:
         outside = record(place("x", "Outside", [point(10, 10)]))
         inside = record(place("x", "Inside", [point(37.775, -122.415)]))
         fake = FakeServer(tilesets=[overture([FakeTile(tile_url("a"), [outside]), FakeTile(tile_url("b"), [inside])])])
-        assert make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).places == []
+        assert make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places == []
 
 
 class TestOrderingTies:
@@ -269,7 +269,7 @@ class TestRegionFilteringCircle:
         box = place("clipping", "Clipping", [bbox_location(89, 80, 50, 40)])
         assert haversine(lat, 0, lat, 40) > radius
         fake = FakeServer(tilesets=[overture([FakeTile(url("t"), [record(box)])])])
-        places = make(fake).search_places(Circle(lat, 0, radius)).places
+        places = make(fake).search_places(Circle(lat, 0, radius), **OVERTURE).places
         assert [id_of(h.origin) for h in places] == ["clipping"]
         assert places[0].distance <= radius
 
@@ -330,7 +330,7 @@ class TestDeterminism:
         outputs = []
         for order in itertools.permutations("abc"):
             fake = FakeServer(tilesets=[overture(self.tiles)], delays={url(n): i * 0.015 for i, n in enumerate(order)})
-            outputs.append(make(fake).search_places(self.region, text=text))
+            outputs.append(make(fake).search_places(self.region, text=text, **OVERTURE))
         assert all(o == outputs[0] for o in outputs)
         places = outputs[0].places
         assert sorted(id_of(h.origin) for h in places) == ["a1", "a2", "b1", "c1", "dup"]

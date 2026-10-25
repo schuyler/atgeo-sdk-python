@@ -18,6 +18,9 @@ from atgeo import (
     AtgeoError,
     Bbox,
     Circle,
+    CollectionAttribution,
+    CollectionRef,
+    PlaceRecord,
     TileCounts,
     TileFailureKind,
 )
@@ -25,7 +28,7 @@ from atgeo.transport import HttpResponse
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, FakeTileset, overture
-from .helpers import place, place_origin, point, record, tile_url, xrpc
+from .helpers import OVERTURE, place, place_origin, point, record, tile_url, xrpc
 
 REGION = Bbox(-122.42, 37.77, -122.41, 37.78)
 BBOX = "-122.42,37.77,-122.41,37.78"
@@ -59,13 +62,13 @@ class TestGetTilesBodies:
     @pytest.mark.parametrize("body", ["{}", "[]", '{"tiles": "x"}', "null", '{"tiles": null}'])
     def test_raise_atgeo_decoding_error_without_a_tiles_list(self, make: Make, body: str) -> None:
         with pytest.raises(AtgeoDecodingError):
-            make(FakeServer(responses={GET_TILES: raw(body)})).search_places(REGION)
+            make(FakeServer(responses={GET_TILES: raw(body)})).search_places(REGION, **OVERTURE)
 
     def test_raise_atgeo_decoding_error_for_a_body_that_is_not_json_with_the_parser_error_as_cause(
         self, make: Make
     ) -> None:
         with pytest.raises(AtgeoDecodingError) as caught:
-            make(FakeServer(responses={GET_TILES: raw("<html>")})).search_places(REGION)
+            make(FakeServer(responses={GET_TILES: raw("<html>")})).search_places(REGION, **OVERTURE)
         assert isinstance(caught.value.__cause__, json.JSONDecodeError)
 
     def test_cache_nothing_when_the_tile_list_is_unusable(self, make: Make) -> None:
@@ -81,14 +84,14 @@ class TestGetTilesBodies:
         fake = FakeServer(tilesets=[overture([FakeTile(tile_url("a"), [record(ok("a"))])])], answer=answer)
         client = make(fake)
         with pytest.raises(AtgeoDecodingError):
-            client.search_places(REGION)
-        assert [h.origin for h in client.search_places(REGION).places] == [place_origin("a")]
+            client.search_places(REGION, **OVERTURE)
+        assert [h.origin for h in client.search_places(REGION, **OVERTURE).places] == [place_origin("a")]
         assert calls[0] == 2
 
     def test_skip_non_string_tile_entries_instead_of_fetching_them(self, make: Make) -> None:
         listing = raw(f'{{"tiles": [1, null, {{}}, "{tile_url("t")}", ["x"]]}}')
         fake = FakeServer(responses={GET_TILES: listing, tile_url("t"): raw(f'{{"records": [{js(record(ok("a")))}]}}')})
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert (result.tiles.fetched, result.tiles.failed) == (1, 0)
         assert fake.requests == [GET_TILES, tile_url("t")]
 
@@ -96,7 +99,7 @@ class TestGetTilesBodies:
 class TestTileRecords:
     def test_skip_records_that_are_not_objects_or_have_no_object_value_and_keep_the_tile(self, make: Make) -> None:
         records = f'[7, "s", [1], null, {{"value": null}}, {{}}, {{"importance": 3}}, {js(record(ok("a")))}]'
-        result = make(tile_serving(records)).search_places(REGION)
+        result = make(tile_serving(records)).search_places(REGION, **OVERTURE)
         assert (result.tiles.fetched, result.tiles.failed) == (1, 0)
         assert [h.origin for h in result.places] == [place_origin("a")]
 
@@ -109,7 +112,7 @@ class TestTileRecords:
     def test_keep_answering_get_place_from_a_tile_that_held_bad_records(self, make: Make) -> None:
         fake = tile_serving(f"[null, 7, {js(record(ok('a'), 4))}]")
         client = make(fake)
-        client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
         fake.go_offline()
         found = client.get_place(place_origin("a"))
         assert (found.origin, dict(found.place), found.importance) == (place_origin("a"), ok("a"), 4)
@@ -125,7 +128,7 @@ class TestTileRecords:
             f'[{{"value": {js(ok("a"))}, "importance": "7"}}, {{"value": {js(ok("b"))}, "importance": [1]}},'
             f' {{"value": {js(ok("c"))}, "importance": true}}]'
         )
-        result = make(tile_serving(records)).search_places(REGION)
+        result = make(tile_serving(records)).search_places(REGION, **OVERTURE)
         assert [h.importance for h in result.places] == [None, None, None]
 
     def test_count_a_2xx_tile_that_is_not_json_as_failed(self, make: Make) -> None:
@@ -137,7 +140,7 @@ class TestTileRecords:
                 tile_url("t"): raw(f'{{"records": [{js(record(ok("a")))}]}}'),
             }
         )
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert (result.tiles.fetched, result.tiles.failed, result.complete) == (1, 1, False)
         assert [h.origin for h in result.places] == [place_origin("a")]
 
@@ -145,7 +148,7 @@ class TestTileRecords:
     def test_count_a_tile_url_that_is_not_absolute_http_as_failed_without_a_request(self, make: Make, bad: str) -> None:
         listing = raw(json.dumps({"tiles": [bad, tile_url("t")]}))
         fake = FakeServer(responses={GET_TILES: listing, tile_url("t"): raw(f'{{"records": [{js(record(ok("a")))}]}}')})
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert (result.tiles.fetched, result.tiles.failed) == (1, 1)
         assert bad not in fake.requests
         assert fake.requests == [GET_TILES, tile_url("t")]
@@ -161,7 +164,7 @@ class TestTileRecords:
                 tile_url("t"): raw(f'{{"records": [{js(record(ok("a")))}]}}'),
             }
         )
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert (result.tiles.fetched, result.tiles.failed) == (1, 1)
         # The server's input overflowed the parser, so the tile failed to decode (contract §4.4).
         [failure] = result.tile_failures
@@ -169,20 +172,76 @@ class TestTileRecords:
         assert isinstance(failure.error, RecursionError)
 
 
+class TestTileAttribution:
+    """Contract §1 and §4.4: a tile's attribution is read inside the guarded decode step and only ever drops entries."""
+
+    good = record(place("good", "Good", [INSIDE]), 4)
+
+    def search(self, make: Make, tile: dict[str, Any]) -> Any:
+        listing = raw(json.dumps({"tiles": [tile_url("a")]}))
+        fake = FakeServer(responses={GET_TILES: listing, tile_url("a"): raw(json.dumps(tile))})
+        return make(fake).search_places(REGION, **OVERTURE)
+
+    def test_gives_a_search_whose_tiles_lack_attribution_an_empty_attribution_and_none_hit_collections(
+        self, make: Make
+    ) -> None:
+        result = self.search(make, {"records": [self.good]})
+        assert result.attribution == ()
+        assert len(result.places) == 1
+        assert result.places[0].collection is None
+
+    @pytest.mark.parametrize("attribution", ["x", {}, None, 5])
+    def test_does_not_fail_the_tile_for_an_attribution_that_is_not_an_array(
+        self, make: Make, attribution: object
+    ) -> None:
+        result = self.search(make, {"records": [self.good], "attribution": attribution})
+        assert (result.complete, result.tiles, result.tile_failures) == (True, TileCounts(fetched=1, failed=0), ())
+        assert result.attribution == ()
+        assert [h.origin for h in result.places] == [place_origin("good")]
+
+    def test_drops_the_entries_that_lack_a_string_dataset_and_collection_and_keeps_the_tile(self, make: Make) -> None:
+        entries = [None, 5, {"dataset": "d"}, {"dataset": "overturemaps.org", "collection": "place"}]
+        result = self.search(make, {"records": [self.good], "attribution": entries})
+        assert result.complete
+        assert result.attribution == (CollectionAttribution(dataset="overturemaps.org", collection="place"),)
+        assert result.places[0].collection == CollectionRef(dataset="overturemaps.org", collection="place")
+
+    def test_reads_each_field_of_an_entry_on_its_own(self, make: Make) -> None:
+        entry = {
+            "dataset": "overturemaps.org",
+            "collection": "place",
+            "release": 5,
+            "source": "s",
+            "licenses": ["l", 1, None],
+            "attribution": ["a"],
+            "extra": 1,
+        }
+        result = self.search(make, {"records": [], "attribution": [entry]})
+        assert result.attribution == (
+            CollectionAttribution(dataset="overturemaps.org", collection="place", source="s", licenses=("l",)),
+        )
+
+    def test_gives_a_tile_that_failed_to_decode_no_attribution_though_its_body_has_some(self, make: Make) -> None:
+        # No records list: the payload is unusable, so the tile failed, and a failed tile contributes nothing.
+        result = self.search(make, {"attribution": [{"dataset": "overturemaps.org", "collection": "place"}]})
+        assert [f.kind for f in result.tile_failures] == [TileFailureKind.DECODE]
+        assert result.attribution == ()
+
+
 class TestPlaceValues:
     def test_skip_null_and_other_non_object_locations(self, make: Make) -> None:
         value = place("a", "A", [None, 3, [], "x", INSIDE])
-        result = make(tile_serving(f"[{js(record(value))}]")).search_places(REGION)
+        result = make(tile_serving(f"[{js(record(value))}]")).search_places(REGION, **OVERTURE)
         assert [h.origin for h in result.places] == [place_origin("a")]
 
     def test_skip_null_variants_when_the_search_has_text(self, make: Make) -> None:
         value = place("m", "München", [INSIDE], {"variants": [None, 4, {"name": "Munich"}]})
-        hits = make(tile_serving(f"[{js(record(value))}]")).search_places(REGION, text="Munich").places
+        hits = make(tile_serving(f"[{js(record(value))}]")).search_places(REGION, text="Munich", **OVERTURE).places
         assert [h.score for h in hits] == [1.0]
 
     def test_read_a_coordinate_given_as_an_array_as_no_location(self, make: Make) -> None:
         arrayed = {**INSIDE, "latitude": [37.775]}
-        result = make(tile_serving(f"[{js(record(place('a', 'A', [arrayed])))}]")).search_places(REGION)
+        result = make(tile_serving(f"[{js(record(place('a', 'A', [arrayed])))}]")).search_places(REGION, **OVERTURE)
         assert result.places == []
 
 
@@ -190,17 +249,61 @@ class TestErrorBodies:
     @pytest.mark.parametrize("body", ['{"error": 7, "message": {}}', "null", '{"error": null}', "[1]", ""])
     def test_read_non_string_error_and_message_fields_as_absent(self, make: Make, body: str) -> None:
         with pytest.raises(AtgeoError) as caught:
-            make(FakeServer(responses={GET_TILES: raw(body, 400)})).search_places(REGION)
+            make(FakeServer(responses={GET_TILES: raw(body, 400)})).search_places(REGION, **OVERTURE)
         assert (caught.value.code, caught.value.message, caught.value.status) == ("HttpError", "HTTP 400", 400)
 
 
 class TestOtherBodies:
     GET_PLACE = xrpc("org.atgeo.getPlace", [("uri", place_origin("a"))])
 
-    @pytest.mark.parametrize("body", ["{}", "null", '{"uri": "x", "record": 5}', '{"record": null}', "[]"])
-    def test_raise_atgeo_decoding_error_for_a_get_place_body_with_no_object_record(self, make: Make, body: str) -> None:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{}",
+            "null",
+            "[]",
+            '{"value": null}',
+            '{"value": []}',
+            '{"value": "x"}',
+            '{"uri": "x", "value": 5}',
+            '{"uri": "x", "record": {"name": "X"}}',  # the earlier shape, record and no value
+        ],
+    )
+    def test_raise_atgeo_decoding_error_for_a_get_place_body_with_no_object_value(self, make: Make, body: str) -> None:
         with pytest.raises(AtgeoDecodingError):
             make(FakeServer(responses={self.GET_PLACE: raw(body)})).get_place(place_origin("a"))
+
+    def test_return_a_get_place_value_as_served_with_an_importance_that_is_not_a_number_as_none(
+        self, make: Make
+    ) -> None:
+        body = '{"uri": 5, "value": {"name": "X", "extra": {"n": [1]}}, "importance": "high"}'
+        found = make(FakeServer(responses={self.GET_PLACE: raw(body)})).get_place(place_origin("a"))
+        assert (found.origin, dict(found.place), found.importance, found.attribution) == (
+            place_origin("a"),
+            {"name": "X", "extra": {"n": [1]}},
+            None,
+            (),
+        )
+
+    def test_succeed_on_the_new_shape_get_place_body_and_return_its_attribution_as_served(self, make: Make) -> None:
+        served = [{"dataset": "d", "collection": "c", "licenses": ["l"]}, {"dataset": "d", "collection": "c"}, 5]
+        body = js({"uri": place_origin("a"), "url": "https://x.example/p", "importance": 3, "value": {"name": "X"}})
+        body = body[:-1] + ', "attribution": ' + js(served) + "}"
+        found = make(FakeServer(responses={self.GET_PLACE: raw(body)})).get_place(place_origin("a"))
+        assert found == PlaceRecord(
+            origin=place_origin("a"),
+            place={"name": "X"},
+            importance=3,
+            attribution=(
+                CollectionAttribution(dataset="d", collection="c", licenses=("l",)),
+                CollectionAttribution(dataset="d", collection="c"),  # duplicates kept, an unreadable entry dropped
+            ),
+        )
+
+    @pytest.mark.parametrize("attribution", ["x", {}, None, 5])
+    def test_read_a_get_place_attribution_that_is_not_an_array_as_empty(self, make: Make, attribution: object) -> None:
+        body = js({"value": {"name": "X"}, "attribution": attribution})
+        assert make(FakeServer(responses={self.GET_PLACE: raw(body)})).get_place(place_origin("a")).attribution == ()
 
     def test_raise_atgeo_decoding_error_for_a_get_place_body_that_is_not_json(self, make: Make) -> None:
         with pytest.raises(AtgeoDecodingError) as caught:
@@ -240,19 +343,19 @@ class TestArguments:
     def test_refuse_an_unknown_sort_before_any_request(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="sort"):
-            make(fake).search_places(REGION, sort="nearest")
+            make(fake).search_places(REGION, sort="nearest", **OVERTURE)
         assert fake.requests == []
 
     @pytest.mark.parametrize("region", [(0, 0, 1, 1), {"lat": 0, "lon": 0, "radius": 1}, None])
     def test_refuse_a_region_of_the_wrong_type_with_type_error(self, make: Make, region: object) -> None:
         fake = FakeServer()
         with pytest.raises(TypeError):
-            make(fake).search_places(region)
+            make(fake).search_places(region, **OVERTURE)
         assert fake.requests == []
 
     def test_check_the_region_before_the_sort(self, make: Make) -> None:
         with pytest.raises(ValueError, match="circle"):
-            make(FakeServer()).search_places(Circle(0, 0, -1), sort="nearest")
+            make(FakeServer()).search_places(Circle(0, 0, -1), sort="nearest", **OVERTURE)
 
 
 def empty_dataset_tileset() -> FakeTileset:
@@ -274,12 +377,12 @@ class TestReviewRegressions:
 
         fake = FakeServer(tilesets=[overture([FakeTile(tile_url("t"), [record(ok("a"))])])], answer=answer)
         with pytest.raises(MemoryError):
-            make(fake).search_places(REGION)
+            make(fake).search_places(REGION, **OVERTURE)
 
     @pytest.mark.parametrize("bad", ["https://user:pw@tiles.example/a.json", "https://user@tiles.example/a.json"])
     def test_count_a_tile_url_with_credentials_as_failed_without_a_request(self, make: Make, bad: str) -> None:
         fake = FakeServer(answer=lambda url: raw(json.dumps({"tiles": [bad]})) if "getTiles" in url else None)
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert result.tiles == TileCounts(fetched=0, failed=1)
         assert all(bad not in r for r in fake.requests)
 
@@ -290,6 +393,6 @@ class TestReviewRegressions:
         assert fake.requests[0].endswith("?uri=urn%3A%EF%BF%BDx")
 
     def test_return_the_callers_origin_from_the_network(self, make: Make) -> None:
-        body = raw('{"uri": "https://elsewhere.example/r/9", "record": {"name": "N", "origin": "urn:x:y:z:9"}}')
+        body = raw('{"uri": "https://elsewhere.example/r/9", "value": {"name": "N", "origin": "urn:x:y:z:9"}}')
         fake = FakeServer(answer=lambda url: body if "getPlace" in url else None)
         assert make(fake).get_place("https://example.org/r/1").origin == "https://example.org/r/1"

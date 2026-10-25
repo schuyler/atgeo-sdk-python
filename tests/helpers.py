@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
+from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+
+import pytest
+
+from atgeo import Bbox, Circle, CollectionAttribution, CollectionRef, Region
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# The dataset and collection a search names; search_places has no defaults (contract §4.1).
+OVERTURE: Final = {"dataset": "overturemaps.org", "collection": "place"}
 
 
 def fixture(name: str) -> Any:
@@ -68,3 +77,37 @@ def xrpc(nsid: str, params: list[tuple[str, str]], server: str = "https://places
     import urllib.parse  # noqa: PLC0415
 
     return f"{server}/xrpc/{nsid}?{urllib.parse.urlencode(params)}"
+
+
+def attribution(entry: Mapping[str, Any]) -> CollectionAttribution:
+    """A CollectionAttribution from a wire-shaped entry: a missing key is None, and licenses a tuple."""
+    fields: dict[str, Any] = {k: tuple(v) if k == "licenses" else v for k, v in entry.items()}
+    return CollectionAttribution(**fields)
+
+
+def collection_ref(pair: Mapping[str, str] | None) -> CollectionRef | None:
+    """A hit's expected collection from its wire shape."""
+    return None if pair is None else CollectionRef(dataset=pair["dataset"], collection=pair["collection"])
+
+
+def region_of(r: Mapping[str, Any]) -> Region:
+    """A fixture's region: {"bbox": [west, south, east, north]} or {"lat", "lon", "radius"}."""
+    if "bbox" in r:
+        return Bbox(*r["bbox"])
+    return Circle(r["lat"], r["lon"], r["radius"])
+
+
+def assert_immutable(entries: Sequence[CollectionAttribution]) -> None:
+    """The attribution an app is handed is its own to hold but not to change (contract §9): this port hands out
+    immutable values, a tuple of frozen entries whose licenses are a tuple, where the reference copies."""
+    assert isinstance(entries, tuple)
+    with pytest.raises(TypeError):
+        entries[0] = entries[-1]  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        entries.append(entries[0])  # type: ignore[attr-defined]
+    for entry in entries:
+        with pytest.raises(FrozenInstanceError):
+            entry.release = "changed"
+        with pytest.raises(FrozenInstanceError):
+            entry.licenses = ("https://l.example/changed",)
+        assert entry.licenses is None or isinstance(entry.licenses, tuple)

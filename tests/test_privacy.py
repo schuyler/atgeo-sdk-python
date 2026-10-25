@@ -19,7 +19,7 @@ from atgeo.transport import HttpResponse
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, overture
-from .helpers import place, point, record
+from .helpers import OVERTURE, place, point, record
 
 TILE = "https://tiles.example/t1.json"
 
@@ -44,7 +44,7 @@ class TestSearchTextStaysLocal:
     @pytest.mark.parametrize("text", ["Zanzibar Quokka", "  ZANZIBÁR   quokka ", "Zanzibar"])
     def test_does_not_put_the_text_on_the_wire(self, make: Make, text: str) -> None:
         client = setup(make)
-        client.search_places(Circle(37.7749295, -122.4194155, 500), text=text)
+        client.search_places(Circle(37.7749295, -122.4194155, 500), text=text, **OVERTURE)
         assert len(client.fake.requests) > 0
         normalized = "zanzibar quokka"
         needles = [text.lower(), text.strip().lower(), normalized, *normalized.split(" "), "zanzib", "quokka"]
@@ -55,7 +55,7 @@ class TestSearchTextStaysLocal:
 
     def test_issues_only_get_tiles_and_tile_requests(self, make: Make) -> None:
         client = setup(make)
-        client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka", **OVERTURE)
         kinds = [
             "tiles" if "/xrpc/org.atgeo.getTiles?" in r else "tile" if r == TILE else r for r in client.fake.requests
         ]
@@ -63,14 +63,14 @@ class TestSearchTextStaysLocal:
 
     def test_sends_no_body(self, make: Make) -> None:
         client = setup(make)
-        client.search_places(Bbox(-122.43, 37.77, -122.41, 37.78), text="Zanzibar Quokka")
+        client.search_places(Bbox(-122.43, 37.77, -122.41, 37.78), text="Zanzibar Quokka", **OVERTURE)
         assert len(client.fake.requests) > 0
 
 
 class TestPreciseCoordinatesStayLocal:
     def test_keeps_the_circle_centre_off_the_wire(self, make: Make) -> None:
         client = setup(make)
-        client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka")
+        client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka", **OVERTURE)
         assert len(client.fake.requests) > 0
         for h in wire(client.fake.requests):
             for needle in ["37.7749295", "122.4194155", "7749295", "4194155", "123.456789"]:
@@ -78,7 +78,7 @@ class TestPreciseCoordinatesStayLocal:
 
     def test_keeps_full_precision_bbox_corners_off_the_wire(self, make: Make) -> None:
         client = setup(make)
-        client.search_places(Bbox(-122.4194155, 37.7749295, -122.4094155, 37.7849295))
+        client.search_places(Bbox(-122.4194155, 37.7749295, -122.4094155, 37.7849295), **OVERTURE)
         assert len(client.fake.requests) > 0
         for h in wire(client.fake.requests):
             for needle in ["7749295", "4194155", "4094155", "7849295"]:
@@ -107,7 +107,7 @@ class TestFailedTileLogs:
         client = setup(make)
         client.fake.fail_tiles.add(TILE)
         caplog.set_level(logging.DEBUG, logger="atgeo")
-        result = client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka")
+        result = client.search_places(Circle(37.7749295, -122.4194155, 123.456789), text="Zanzibar Quokka", **OVERTURE)
         assert len(result.tile_failures) == 1
         [entry] = [r for r in caplog.records if r.name == "atgeo"]
         assert entry.levelno == logging.DEBUG
@@ -124,14 +124,16 @@ class TestFailedTileLogs:
         listing = HttpResponse(200, json.dumps({"tiles": [bad]}).encode())
         fake = FakeServer(answer=lambda url: listing if "getTiles" in url else None)
         caplog.set_level(logging.DEBUG, logger="atgeo")
-        assert [f.url for f in make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78)).tile_failures] == [bad]
+        assert [
+            f.url for f in make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).tile_failures
+        ] == [bad]
         [entry] = [r for r in caplog.records if r.name == "atgeo"]
         assert "\n" not in entry.getMessage()
         assert repr(bad) in entry.getMessage()
 
     def test_logs_nothing_for_a_complete_search(self, make: Make, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.DEBUG, logger="atgeo")
-        setup(make).search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+        setup(make).search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka", **OVERTURE)
         assert [r for r in caplog.records if r.name.startswith("atgeo")] == []
 
     def test_logs_nothing_for_a_search_that_fails(
@@ -148,5 +150,5 @@ class TestFailedTileLogs:
         monkeypatch.setattr(TileCache, "set", broken)
         caplog.set_level(logging.DEBUG, logger="atgeo")
         with pytest.raises(RuntimeError):
-            client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka")
+            client.search_places(Circle(37.7749295, -122.4194155, 500), text="Zanzibar Quokka", **OVERTURE)
         assert [r for r in caplog.records if r.name.startswith("atgeo")] == []

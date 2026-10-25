@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -34,6 +37,8 @@ from atgeo.types import (
     ServiceDescription,
     Tileset,
 )
+
+from .helpers import fixture
 
 
 def j(text: str) -> Any:
@@ -78,6 +83,65 @@ class TestPrimitives:
     def test_an_absent_overview_is_false(self) -> None:
         assert truthy() is False
         assert read_tile_list(j('{"tiles": []}')).overview is False
+
+
+# fixtures/lenient-readers.json (contract §13): a body for each of the five readers and what a port's reader
+# keeps of it, in JSON terms. The readers return dataclasses, and a field that is None is a missing key.
+LENIENT: list[dict[str, Any]] = fixture("lenient-readers.json")
+READERS: dict[str, Callable[[object], object]] = {
+    "getTiles": read_tile_list,
+    "tilePayload": read_tile_payload,
+    "getPlace": read_place,
+    "describeService": read_service_description,
+    "describeTileset": read_tileset,
+}
+
+
+def camel(name: str) -> str:
+    return re.sub(r"_([a-z])", lambda m: m.group(1).upper(), name)
+
+
+def to_json(v: object) -> object:
+    """What a reader returned, in the fixture's terms: camelCase keys, None as a missing key, lists for tuples."""
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        return {
+            camel(f.name): to_json(getattr(v, f.name)) for f in dataclasses.fields(v) if getattr(v, f.name) is not None
+        }
+    if isinstance(v, (list, tuple)):
+        return [to_json(x) for x in v]
+    return v
+
+
+def same(a: object, b: object) -> bool:
+    """Equal in JSON terms, strictly: True is not 1, 1 is not 1.0, and a missing key is not a null."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+class TestLenientReaders:
+    def test_has_a_case_for_every_reader(self) -> None:
+        assert sorted({c["reader"] for c in LENIENT}) == sorted(READERS)
+
+    @pytest.mark.parametrize("case", LENIENT, ids=[f"{c['reader']}: {c['name']}" for c in LENIENT])
+    def test_reads_the_body_as_the_fixture_says(self, case: dict[str, Any]) -> None:
+        read = READERS[case["reader"]]
+        if case.get("decodingError"):
+            with pytest.raises(AtgeoDecodingError):
+                read(case["body"])
+        else:
+            got = to_json(read(case["body"]))
+            assert same(got, case["result"]), (got, case["result"])
+
+    def test_compares_strictly(self) -> None:
+        assert same({"a": [1, "x"]}, {"a": [1, "x"]})
+        assert not same(True, 1)
+        assert not same(1, 1.0)
+        assert not same({"a": None}, {})
 
 
 class TestJson:
@@ -136,21 +200,29 @@ class TestErrorBodies:
 class TestTilePayloads:
     def test_keeps_value_uri_and_importance_and_nothing_else(self) -> None:
         rec = '{"value": {"b": 1, "a": {"z": [2.50]}}, "uri": "u", "importance": 3, "x": 4}'
-        records = read_tile_payload(j('{"publishedAt": "x", "records": [' + rec + "]}"))
+        records = read_tile_payload(j('{"publishedAt": "x", "records": [' + rec + "]}")).records
         assert records == [TileRecord({"b": 1, "a": {"z": [2.5]}}, "u", 3)]
         assert list(records[0].value) == ["b", "a"]
 
     def test_skips_records_that_are_not_objects_or_have_no_object_value_and_keeps_the_tile(self) -> None:
-        records = read_tile_payload(
+        payload = read_tile_payload(
             j('{"records": [7, "s", [1], null, {"value": null}, {}, {"value": 5}, {"value": {"name": "ok"}}]}')
         )
-        assert [r.value["name"] for r in records] == ["ok"]
+        assert [r.value["name"] for r in payload.records] == ["ok"]
 
     def test_reads_a_wrong_typed_uri_or_importance_as_absent(self) -> None:
-        records = read_tile_payload(
+        payload = read_tile_payload(
             j('{"records": [{"value": {}, "uri": {}, "importance": "7"}, {"value": {}, "uri": 9, "importance": [1]}]}')
         )
-        assert records == [TileRecord({}), TileRecord({})]
+        assert payload.records == [TileRecord({}), TileRecord({})]
+
+    def test_reads_the_attribution_beside_the_records_and_none_when_it_is_not_an_array(self) -> None:
+        entry = '{"dataset": "d", "collection": "c", "licenses": ["l", 1], "release": 5}'
+        payload = read_tile_payload(j('{"records": [], "attribution": [' + entry + ', {"dataset": "d"}, null]}'))
+        assert payload.attribution == (CollectionAttribution(dataset="d", collection="c", licenses=("l",)),)
+        assert read_tile_payload(j('{"records": [], "attribution": []}')).attribution == ()
+        for text in ('{"records": []}', '{"records": [], "attribution": {}}', '{"records": [], "attribution": null}'):
+            assert read_tile_payload(j(text)).attribution is None
 
     @pytest.mark.parametrize("text", ["{}", "[]", "null", "5", '{"records": {}}', '{"records": "x"}'])
     def test_raises_without_a_records_list(self, text: str) -> None:
@@ -169,11 +241,26 @@ class TestGetTiles:
 
 
 class TestGetPlace:
-    def test_reads_the_record_and_importance_not_the_uri(self) -> None:
-        assert read_place(j('{"uri": 5, "record": {"name": "x"}, "importance": 2.7}')) == ({"name": "x"}, 2)
+    def test_reads_the_value_importance_and_attribution_not_the_uri_or_url(self) -> None:
+        body = read_place(j('{"uri": 5, "url": 6, "value": {"name": "x"}, "importance": 2.7, "attribution": []}'))
+        assert (body.value, body.importance, body.attribution) == ({"name": "x"}, 2, ())
+
+    def test_reads_the_attribution_as_served_unsorted_duplicates_included(self) -> None:
+        entries = ", ".join(f'{{"dataset": "{d}", "collection": "c"}}' for d in "zaz")
+        body = read_place(j('{"value": {}, "attribution": [' + entries + "]}"))
+        assert [e.dataset for e in body.attribution] == ["z", "a", "z"]
+
+    @pytest.mark.parametrize("text", ["{}", "null", "[]", '{"value": null}', '{"value": [1]}', '{"value": "x"}'])
+    def test_raises_without_an_object_value(self, text: str) -> None:
+        with pytest.raises(AtgeoDecodingError):
+            read_place(j(text))
+
+    def test_raises_for_the_earlier_shape_with_a_record_and_no_value(self) -> None:
+        with pytest.raises(AtgeoDecodingError):
+            read_place(j('{"uri": "x", "record": {"name": "X"}}'))
 
     @pytest.mark.parametrize("text", ["{}", "null", "[]", '{"record": null}', '{"record": [1]}', '{"record": "x"}'])
-    def test_raises_without_an_object_record(self, text: str) -> None:
+    def test_does_not_fall_back_to_a_record(self, text: str) -> None:
         with pytest.raises(AtgeoDecodingError):
             read_place(j(text))
 

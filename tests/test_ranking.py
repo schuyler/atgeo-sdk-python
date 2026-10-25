@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-from atgeo import Circle, Region
 from atgeo._rank import rank, round3
 from atgeo._text import jaro_winkler, text_score
 from atgeo._wire import TileRecord
@@ -13,7 +12,7 @@ from atgeo.types import Bbox, SortMode
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, overture
-from .helpers import bbox_location, fixture, place, place_origin, point, record
+from .helpers import bbox_location, fixture, place, place_origin, point, record, region_of
 
 SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
 
@@ -116,21 +115,16 @@ class TestSortKeys:
         assert [h.importance for h in rank(recs, REGION, "", SortMode.FUSED)] == [2**62, -1]
 
 
-def scenario_region(r: dict[str, Any]) -> Region:
-    if "bbox" in r:
-        return Bbox(*r["bbox"])
-    return Circle(r["lat"], r["lon"], r["radius"])
-
-
 class TestRankingScenarios:
     @pytest.mark.parametrize("s", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
     def test_scenario(self, make: Make, s: dict[str, Any]) -> None:
         records = [record(r["value"], r["importance"]) for r in s["records"]]
         fake = FakeServer(tilesets=[overture([FakeTile("https://places.atgeo.org/tiles/t0.json", records)])])
-        kwargs: dict[str, Any] = {"text": s.get("text")}
+        # Each scenario names the dataset and collection it is a search of (contract §8).
+        kwargs: dict[str, Any] = {"dataset": s["dataset"], "collection": s["collection"], "text": s.get("text")}
         if "sort" in s:
             kwargs["sort"] = s["sort"]
-        places = make(fake).search_places(scenario_region(s["region"]), **kwargs).places
+        places = make(fake).search_places(region_of(s["region"]), **kwargs).places
         origins = [p.origin for p in places]
         for top in s["expect"]["top"]:
             for origin in top["origins"]:
