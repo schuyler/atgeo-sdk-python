@@ -22,6 +22,7 @@ from atgeo.transport import HttpResponse, prepare_url
 
 DEFAULT_SERVER = "https://places.atgeo.org"
 PUBLISHED_AT = "2026-01-01T00:00:00Z"
+MAX_TILES = 50  # the tile budget describeService reports; constant, as garganorn serves it
 BBOX = re.compile(r"^-?\d+\.\d\d,-?\d+\.\d\d,-?\d+\.\d\d,-?\d+\.\d\d$")
 # format: uri, as the lexicon demands it: a scheme, a colon, optional //, then non-space characters not
 # starting with /. "not a uri" fails; urn:atgeo:... and https://... pass.
@@ -47,6 +48,7 @@ class FakeTileset:
     collections: list[dict[str, Any]]
     tiles: list[FakeTile] = field(default_factory=list)
     references: list[dict[str, Any]] | None = None
+    overview: dict[str, Any] | None = None
 
 
 def overture(tiles: Sequence[FakeTile]) -> FakeTileset:
@@ -167,15 +169,20 @@ class FakeServer:
         return HttpResponse(404, b"Not found")
 
     @staticmethod
-    def _tile_body(tileset: FakeTileset, records: list[dict[str, Any]]) -> dict[str, Any]:
-        attribution = [_attribution(c) for c in tileset.collections] + list(tileset.references or [])
-        return {"publishedAt": PUBLISHED_AT, "attribution": attribution, "records": records}
+    def _attribution_list(tileset: FakeTileset) -> list[dict[str, Any]]:
+        """What every tile of the tileset carries and getPlace answers with: its collections, then its references."""
+        return [_attribution(c) for c in tileset.collections] + list(tileset.references or [])
+
+    def _tile_body(self, tileset: FakeTileset, records: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"publishedAt": PUBLISHED_AT, "attribution": self._attribution_list(tileset), "records": records}
 
     @staticmethod
     def _descriptor(t: FakeTileset) -> dict[str, Any]:
         d: dict[str, Any] = {"slug": t.slug, "collections": t.collections}
         if t.references is not None:
             d["references"] = t.references
+        if t.overview is not None:
+            d["overview"] = t.overview
         return d
 
     def _xrpc(self, nsid: str, params: dict[str, str]) -> HttpResponse:
@@ -188,6 +195,7 @@ class FakeServer:
             return _json(
                 {
                     "did": f"did:web:{host}",
+                    "maxTiles": MAX_TILES,
                     "tilesets": [
                         {
                             "slug": t.slug,
@@ -236,10 +244,14 @@ class FakeServer:
             for tile in t.tiles:
                 for r in tile.records:
                     if r["value"].get("origin") == origin:
-                        body: dict[str, Any] = {"uri": f"{self.server}/{dataset}/{collection}/{':'.join(rest)}"}
+                        body: dict[str, Any] = {
+                            "uri": origin,
+                            "url": f"{self.server}/{dataset}/{collection}/{':'.join(rest)}",
+                        }
                         if "importance" in r:
                             body["importance"] = r["importance"]
-                        body["record"] = r["value"]
+                        body["value"] = r["value"]
+                        body["attribution"] = self._attribution_list(t)
                         return _json(body)
         return _error("PlaceNotFound", f"Place {origin} not found")
 
