@@ -145,14 +145,13 @@ def read_attribution(entries: list[Any]) -> tuple[Attribution, ...]:
         dataset, collection = e.get("dataset"), e.get("collection")
         if type(dataset) is not str or type(collection) is not str:
             continue
-        licenses = e.get("licenses")
         out.append(
             Attribution(
                 dataset=dataset,
                 collection=collection,
                 release=_str(e, "release"),
                 source=_str(e, "source"),
-                licenses=tuple(x for x in licenses if type(x) is str) if type(licenses) is list else None,
+                licenses=_strings(e, "licenses"),
                 attribution=_str(e, "attribution"),
             )
         )

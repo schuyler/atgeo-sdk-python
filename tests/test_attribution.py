@@ -19,7 +19,7 @@ from atgeo.transport import HttpResponse, prepare_url
 
 from .conftest import Make
 from .fake_server import DEFAULT_SERVER, FakeServer
-from .helpers import attribution, collection_key, fixture, region_of
+from .helpers import attribution, collection_key, fixture, place, point, record, region_of
 
 SCENARIOS: list[dict[str, Any]] = fixture("attribution-scenarios.json")
 GET_TILES = f"{DEFAULT_SERVER}/xrpc/org.atgeo.getTiles"
@@ -90,7 +90,7 @@ class TestTilesArrivingInReverseUrlOrder:
     @pytest.mark.parametrize("s", MULTI, ids=[s["name"] for s in MULTI])
     def test_scenario(self, make: Make, s: dict[str, Any]) -> None:
         urls = sorted(t["url"] for t in s["tiles"])
-        server = Raw(s, {u: (len(urls) - 1 - i) * 0.05 for i, u in enumerate(urls)})
+        server = Raw(s, {u: (len(urls) - 1 - i) * 0.2 for i, u in enumerate(urls)})
         result = search(make, s, server)
         assert server.arrivals == urls[::-1]  # the delays took effect: the test is not vacuous
         check(result, s)
@@ -133,3 +133,33 @@ class TestOrdinalOrderAboveTheBmp:
         )
         result = search(make, s, Raw(s))
         assert [e.release for e in result.attribution] == ["astral"]
+
+
+class TestAHitTakesItsOwnTilesAttribution:
+    """Each hit's collection comes from the attribution of the tile its record came from, not the first tile's
+    and not the merged list's, and the pairing survives a record the text score drops."""
+
+    @staticmethod
+    def two_tiles(name_1: str = "Cafe", name_2: str = "Cafe") -> dict[str, Any]:
+        def tile(n: int, name: str) -> tuple[str, dict[str, Any]]:
+            value = place(str(n), name, [point(37.77, -122.415)], {"origin": f"urn:atgeo:d:c{n}:{n}"})
+            return f"https://tiles.example/{'ab'[n - 1]}.json", payload(
+                [{"dataset": "d", "collection": f"c{n}"}], [record(value)]
+            )
+
+        return scenario(tile(1, name_1), tile(2, name_2))
+
+    def test_gives_each_hit_the_collection_of_its_own_tile(self, make: Make) -> None:
+        s = self.two_tiles()
+        result = search(make, s, Raw(s))
+        assert {h.origin: h.collection for h in result.places} == {
+            "urn:atgeo:d:c1:1": CollectionKey(dataset="d", collection="c1"),
+            "urn:atgeo:d:c2:2": CollectionKey(dataset="d", collection="c2"),
+        }
+
+    def test_keeps_the_pairing_when_the_text_drops_an_earlier_record(self, make: Make) -> None:
+        s = self.two_tiles(name_1="Zzzzqqq")
+        result = make(Raw(s).fake).search_places(region_of(s["region"]), dataset="d", text="Cafe")
+        assert [(h.origin, h.collection) for h in result.places] == [
+            ("urn:atgeo:d:c2:2", CollectionKey(dataset="d", collection="c2"))
+        ]
