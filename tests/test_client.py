@@ -464,6 +464,12 @@ class TestDatasetsAndCollections:
             assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
             assert parameter.default is inspect.Parameter.empty
 
+    def test_requires_dataset_in_the_type(self) -> None:
+        # mypy reports an unused ignore here if dataset ever becomes optional again.
+        client = AtgeoClient(transport=FakeServer().transport)
+        with pytest.raises(TypeError, match="dataset"):
+            client.search_places(REGION)  # type: ignore[call-arg]
+
     def test_raises_for_a_missing_dataset_when_the_async_client_is_called_not_awaited(self) -> None:
         fake = FakeServer()
         search: Any = AsyncAtgeoClient(transport=fake.async_transport).search_places
