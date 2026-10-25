@@ -14,7 +14,7 @@ from atgeo import AsyncAtgeoClient, AtgeoClient, AtgeoError, Bbox
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, overture
-from .helpers import place, place_origin, point, record
+from .helpers import OVERTURE, place, place_origin, point, record
 
 REGION = Bbox(-122.42, 37.77, -122.41, 37.78)
 
@@ -36,7 +36,7 @@ def many_tiles(n: int, per_tile: int = 1, delay: float = 0.0) -> FakeServer:
 class TestTilesInFlight:
     def test_never_exceed_eight_and_reach_it(self, make: Make) -> None:
         fake = many_tiles(20, delay=0.05)
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert result.tiles.fetched == 20
         assert fake.peak_in_flight == 8
 
@@ -46,7 +46,7 @@ class TestTilesInFlight:
         # first eight as a set. The async client claims and calls on one thread, in order.
         fake = many_tiles(20, delay=0.2)
         client = make(fake)
-        client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
         requested = fake.requests[1:]
         assert sorted(requested) == [tile(i) for i in range(20)]
         if client.kind == "async":
@@ -67,8 +67,8 @@ class TestFailedGetTiles:
         fake.tiles_for = tiles_for
         client = make(fake)
         with pytest.raises(AtgeoError):
-            client.search_places(REGION)
-        assert client.search_places(REGION).tiles.fetched == 1
+            client.search_places(REGION, **OVERTURE)
+        assert client.search_places(REGION, **OVERTURE).tiles.fetched == 1
         assert calls[0] == 2
 
     def test_fails_a_crossing_search_when_the_first_half_fails(self, make: Make) -> None:
@@ -80,7 +80,7 @@ class TestFailedGetTiles:
         fake = many_tiles(1)
         fake.tiles_for = tiles_for
         with pytest.raises(AtgeoError) as caught:
-            make(fake).search_places(Bbox(170, 10, -170, 20))
+            make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
         assert (caught.value.code, caught.value.message) == ("BboxTooLarge", "first half")
 
 
@@ -90,7 +90,7 @@ class TestAsyncCancellation:
 
         async def run() -> None:
             client = AsyncAtgeoClient(transport=fake.async_transport)
-            task = asyncio.create_task(client.search_places(REGION))
+            task = asyncio.create_task(client.search_places(REGION, **OVERTURE))
             while fake.in_flight == 0:
                 await asyncio.sleep(0.005)
             task.cancel()
@@ -119,7 +119,7 @@ class TestAsyncCancellation:
                     last = now
 
             tick = asyncio.create_task(ticker())
-            result = await client.search_places(REGION, text="Place 7")
+            result = await client.search_places(REGION, text="Place 7", **OVERTURE)
             stop.set()
             await tick
             assert result.tiles.fetched == 40
@@ -138,7 +138,7 @@ class TestKeyboardInterrupt:
         start = time.monotonic()
         try:
             with pytest.raises(KeyboardInterrupt):
-                client.search_places(REGION)
+                client.search_places(REGION, **OVERTURE)
             elapsed = time.monotonic() - start
         finally:
             timer.cancel()
@@ -161,7 +161,7 @@ class TestSharedClient:
 
         def search() -> None:
             try:
-                origins = [h.origin for h in client.search_places(REGION, text="Place 3").places]
+                origins = [h.origin for h in client.search_places(REGION, text="Place 3", **OVERTURE).places]
                 with lock:
                     results.append(origins)
             except BaseException as e:

@@ -21,12 +21,12 @@ def _ok(x: float, limit: float) -> bool:
 def validate_region(region: Region) -> None:
     """Raise before any request, in the contract's order, so a call with two faults fails the same everywhere."""
     if isinstance(region, Bbox):
-        if not all(_ok(x, 180) for x in (region.min_lon, region.max_lon)):
+        if not all(_ok(x, 180) for x in (region.west, region.east)):
             raise ValueError(f"invalid bbox longitude: {region}")
-        if not all(_ok(x, 90) for x in (region.min_lat, region.max_lat)):
+        if not all(_ok(x, 90) for x in (region.south, region.north)):
             raise ValueError(f"invalid bbox latitude: {region}")
-        if region.min_lat > region.max_lat:
-            raise ValueError(f"invalid bbox: min_lat > max_lat: {region}")
+        if region.south > region.north:
+            raise ValueError(f"invalid bbox: south > north: {region}")
     elif isinstance(region, Circle):
         if not _ok(region.lat, 90) or not _ok(region.lon, 180):
             raise ValueError(f"invalid circle centre: {region}")
@@ -40,13 +40,10 @@ def center(region: Region) -> tuple[float, float]:
     """(lat, lon) of the region's centre."""
     if isinstance(region, Circle):
         return region.lat, region.lon
-    if region.min_lon <= region.max_lon:
-        lon = (region.min_lon + region.max_lon) / 2
-    else:
-        lon = (region.min_lon + region.max_lon + 360) / 2
+    lon = (region.west + region.east + (0 if region.west <= region.east else 360)) / 2
     if lon > 180:
         lon -= 360
-    return (region.min_lat + region.max_lat) / 2, lon
+    return (region.south + region.north) / 2, lon
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -122,7 +119,7 @@ def _fixed(units: int) -> str:
 def query_bboxes(region: Region) -> list[str]:
     """The snapped getTiles bbox strings, one per antimeridian half, in call order."""
     if isinstance(region, Bbox):
-        min_lon, min_lat, max_lon, max_lat = region.min_lon, region.min_lat, region.max_lon, region.max_lat
+        min_lon, min_lat, max_lon, max_lat = region.west, region.south, region.east, region.north
     else:
         min_lon, min_lat, max_lon, max_lat = _circle_box(region.lat, region.lon, region.radius)
     lat0, lat1 = _snap_span(min_lat, max_lat, 90)

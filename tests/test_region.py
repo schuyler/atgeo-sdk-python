@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 import urllib.parse
@@ -11,7 +12,7 @@ from atgeo.types import Bbox, Circle, Region
 
 from .conftest import Make
 from .fake_server import FakeServer, FakeTile, overture
-from .helpers import place, place_origin, point, record
+from .helpers import OVERTURE, place, place_origin, point, record
 
 COORD = re.compile(r"^-?\d{1,3}\.\d{2}$")
 
@@ -26,12 +27,43 @@ def bboxes_sent(fake: FakeServer) -> list[str]:
 
 def emitted(make: Make, region: Region) -> list[str]:
     fake = FakeServer()
-    make(fake).search_places(region)
+    make(fake).search_places(region, **OVERTURE)
     return bboxes_sent(fake)
 
 
 def parse(bbox: str) -> list[float]:
     return [float(x) for x in bbox.split(",")]
+
+
+class TestBboxFieldNames:
+    """The region's fields are west, south, east and north, the wire order (contract §3, garganorn#16)."""
+
+    def test_names_the_fields_west_south_east_north_in_that_order(self) -> None:
+        assert [f.name for f in dataclasses.fields(Bbox)] == ["west", "south", "east", "north"]
+        box = Bbox(-122.42, 37.77, -122.41, 37.78)
+        assert (box.west, box.south, box.east, box.north) == (-122.42, 37.77, -122.41, 37.78)
+
+    def test_takes_the_fields_by_keyword(self, make: Make) -> None:
+        by_name = Bbox(west=-122.42, south=37.77, east=-122.41, north=37.78)
+        assert by_name == Bbox(-122.42, 37.77, -122.41, 37.78)
+        assert emitted(make, by_name) == ["-122.42,37.77,-122.41,37.78"]
+
+    def test_crosses_the_antimeridian_when_west_is_greater_than_east(self, make: Make) -> None:
+        assert emitted(make, Bbox(west=170, south=10, east=-170, north=20)) == [
+            "170.00,10.00,180.00,20.00",
+            "-180.00,10.00,-170.00,20.00",
+        ]
+        assert center(Bbox(west=170, south=10, east=-170, north=20)) == (15, 180)
+
+    @pytest.mark.parametrize("old", ["min_lon", "min_lat", "max_lon", "max_lat"])
+    def test_has_no_field_under_its_old_name(self, old: str) -> None:
+        assert not hasattr(Bbox(0, 0, 1, 1), old)
+        with pytest.raises(TypeError):
+            Bbox(**{old: 0.0})
+
+    def test_names_the_fields_in_the_invalid_bbox_message(self, make: Make) -> None:
+        with pytest.raises(ValueError, match="south > north"):
+            make(FakeServer()).search_places(Bbox(west=0, south=10, east=1, north=5), **OVERTURE)
 
 
 class TestWorkedExamples:
@@ -110,13 +142,13 @@ class TestCoordinateSerialization:
         ]
         for region in regions:
             for bbox in emitted(make, region):
-                min_lon, min_lat, max_lon, max_lat = parse(bbox)
-                assert min_lon >= -180
-                assert max_lon <= 180
-                assert min_lat >= -90
-                assert max_lat <= 90
-                assert min_lon < max_lon
-                assert min_lat < max_lat
+                west, south, east, north = parse(bbox)
+                assert west >= -180
+                assert east <= 180
+                assert south >= -90
+                assert north <= 90
+                assert west < east
+                assert south < north
 
 
 class TestOutwardSnapping:
@@ -133,15 +165,15 @@ class TestOutwardSnapping:
             (151.2093, -33.8688, 151.2193, -33.8588),
             (-73.9857, 40.7484, -73.9757, 40.7584),
         ]
-        for min_lon, min_lat, max_lon, max_lat in inputs:
-            [bbox] = emitted(make, Bbox(min_lon, min_lat, max_lon, max_lat))
+        for west, south, east, north in inputs:
+            [bbox] = emitted(make, Bbox(west, south, east, north))
             a, b, c, d = parse(bbox)
-            assert a <= min_lon
-            assert b <= min_lat
-            assert c >= max_lon
-            assert d >= max_lat
-            assert c - a < max_lon - min_lon + 0.0201
-            assert d - b < max_lat - min_lat + 0.0201
+            assert a <= west
+            assert b <= south
+            assert c >= east
+            assert d >= north
+            assert c - a < east - west + 0.0201
+            assert d - b < north - south + 0.0201
 
     def test_does_not_widen_a_grid_aligned_bbox_through_float_error(self, make: Make) -> None:
         assert emitted(make, Bbox(-122.42, 37.77, -122.41, 37.78)) == ["-122.42,37.77,-122.41,37.78"]
@@ -181,11 +213,11 @@ class TestCircleToBbox:
 
     def test_widens_longitude_to_the_spherical_caps_half_width(self, make: Make) -> None:
         [bbox] = emitted(make, Circle(60, 10, 111194.927))
-        min_lon, min_lat, max_lon, max_lat = parse(bbox)
-        assert abs(min_lat - 59) < 0.05  # toBeCloseTo(59, 1)
-        assert abs(max_lat - 61) < 0.05
-        assert 7.99 <= min_lon <= 8
-        assert 12 <= max_lon <= 12.01
+        west, south, east, north = parse(bbox)
+        assert abs(south - 59) < 0.05  # toBeCloseTo(59, 1)
+        assert abs(north - 61) < 0.05
+        assert 7.99 <= west <= 8
+        assert 12 <= east <= 12.01
 
     # asin(sin 20° / cos 60°) = 43.16°; the flat 20° / cos 60° is 40°.
     def test_reaches_the_caps_true_east_and_west_edges_at_high_latitude(self, make: Make) -> None:
@@ -194,15 +226,15 @@ class TestCircleToBbox:
     def test_covers_all_longitudes_for_a_polar_circle(self, make: Make) -> None:
         north = emitted(make, Circle(89.9, 12.34, 50000))
         assert len(north) == 1
-        n_min_lon, n_min_lat, n_max_lon, n_max_lat = parse(north[0])
-        assert [n_min_lon, n_max_lon, n_max_lat] == [-180, 180, 90]
-        assert 89.44 <= n_min_lat <= 89.46
+        n_west, n_south, n_east, n_north = parse(north[0])
+        assert [n_west, n_east, n_north] == [-180, 180, 90]
+        assert 89.44 <= n_south <= 89.46
 
         south = emitted(make, Circle(-89.9, -45, 50000))
         assert len(south) == 1
-        s_min_lon, s_min_lat, s_max_lon, s_max_lat = parse(south[0])
-        assert [s_min_lon, s_max_lon, s_min_lat] == [-180, 180, -90]
-        assert -89.46 <= s_max_lat <= -89.44
+        s_west, s_south, s_east, s_north = parse(south[0])
+        assert [s_west, s_east, s_south] == [-180, 180, -90]
+        assert -89.46 <= s_north <= -89.44
 
 
 class TestAntimeridian:
@@ -241,7 +273,7 @@ class TestAntimeridian:
             ],
             tiles_for=lambda bbox: [west] if bbox.startswith("170") else [east],
         )
-        result = make(fake).search_places(Bbox(170, 10, -170, 20))
+        result = make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
         assert sorted(str(h.origin) for h in result.places) == [place_origin("e"), place_origin("w")]
         assert result.complete is True
 
@@ -263,7 +295,7 @@ class TestInvalidRegions:
             pytest.param(Bbox(0, 0, math.nan, 1), id="bbox NaN"),
             pytest.param(Bbox(0, 0, 1, math.inf), id="bbox Infinity"),
             pytest.param(Bbox(-math.inf, 0, 1, 1), id="bbox -Infinity"),
-            pytest.param(Bbox(0, 10, 1, 5), id="bbox minLat > maxLat"),
+            pytest.param(Bbox(0, 10, 1, 5), id="bbox south > north"),
             pytest.param(Bbox(0, 0, 1, 91), id="bbox lat above 90"),
             pytest.param(Bbox(0, -91, 1, 0), id="bbox lat below -90"),
             pytest.param(Bbox(0, 0, 181, 1), id="bbox lon above 180"),
@@ -273,33 +305,33 @@ class TestInvalidRegions:
     def test_raises_value_error_before_any_request(self, make: Make, region: Region) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="invalid"):
-            make(fake).search_places(region)
+            make(fake).search_places(region, **OVERTURE)
         assert fake.requests == []
 
-    def test_accepts_min_lon_greater_than_max_lon(self, make: Make) -> None:
-        assert make(FakeServer()).search_places(Bbox(170, 0, -170, 1)) is not None
+    def test_accepts_west_greater_than_east(self, make: Make) -> None:
+        assert make(FakeServer()).search_places(Bbox(170, 0, -170, 1), **OVERTURE) is not None
 
     def test_raises_value_error_before_any_request_for_similarity_sort_without_text(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="similarity"):
-            make(fake).search_places(Bbox(0, 0, 1, 1), sort="similarity")
+            make(fake).search_places(Bbox(0, 0, 1, 1), sort="similarity", **OVERTURE)
         assert fake.requests == []
 
     # Python-specific: the argument checks the reference's types make unnecessary.
     def test_raises_value_error_before_any_request_for_an_unknown_sort(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="unknown sort"):
-            make(fake).search_places(Bbox(0, 0, 1, 1), sort="nearest")
+            make(fake).search_places(Bbox(0, 0, 1, 1), sort="nearest", **OVERTURE)
         assert fake.requests == []
 
     def test_raises_type_error_before_any_request_for_a_region_of_the_wrong_type(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(TypeError, match="Circle or a Bbox"):
-            make(fake).search_places((0, 0, 1, 1))
+            make(fake).search_places((0, 0, 1, 1), **OVERTURE)
         assert fake.requests == []
 
     def test_checks_the_region_before_the_sort(self, make: Make) -> None:
         with pytest.raises(ValueError, match="invalid"):
-            make(FakeServer()).search_places(Circle(math.nan, 0, 1), sort="nearest")
+            make(FakeServer()).search_places(Circle(math.nan, 0, 1), sort="nearest", **OVERTURE)
         with pytest.raises(ValueError, match="unknown sort"):
-            make(FakeServer()).search_places(Circle(0, 0, 1), sort="nearest", text=None)
+            make(FakeServer()).search_places(Circle(0, 0, 1), sort="nearest", text=None, **OVERTURE)

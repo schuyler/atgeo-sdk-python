@@ -6,7 +6,7 @@ from atgeo import Bbox
 
 from .conftest import Client, Make
 from .fake_server import FakeServer, FakeTile, TilesFor, overture
-from .helpers import place, point, record
+from .helpers import OVERTURE, place, point, record
 
 EAST = "https://tiles.example/east.json"
 WEST = "https://tiles.example/west.json"
@@ -27,23 +27,23 @@ def tiles_count(requests: list[str]) -> int:
 
 class TestOverviewAnswers:
     def test_flags_an_overview_answer_whose_tiles_all_load_as_overview_and_complete(self, make: Make) -> None:
-        result = setup(make, lambda _b: {"tiles": [EAST, WEST], "overview": True}).search_places(REGION)
+        result = setup(make, lambda _b: {"tiles": [EAST, WEST], "overview": True}).search_places(REGION, **OVERTURE)
         assert result.overview is True
         assert result.complete is True
         assert "summary" not in {f.name for f in dataclasses.fields(result)}
 
     def test_does_not_flag_a_regular_answer_with_a_failed_tile(self, make: Make) -> None:
-        result = setup(make, None, [WEST]).search_places(REGION)
+        result = setup(make, None, [WEST]).search_places(REGION, **OVERTURE)
         assert result.overview is False
         assert result.complete is False
 
     def test_reads_an_answer_without_the_key_as_regular(self, make: Make) -> None:
-        assert setup(make, lambda _b: {"tiles": [EAST, WEST]}).search_places(REGION).overview is False
+        assert setup(make, lambda _b: {"tiles": [EAST, WEST]}).search_places(REGION, **OVERTURE).overview is False
 
     def test_keeps_the_flag_when_the_tile_list_cache_answers(self, make: Make) -> None:
         client = setup(make, lambda _b: {"tiles": [EAST, WEST], "overview": True})
-        client.search_places(REGION)
-        second = client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
+        second = client.search_places(REGION, **OVERTURE)
         assert tiles_count(client.fake.requests) == 1
         assert second.overview is True
 
@@ -51,4 +51,4 @@ class TestOverviewAnswers:
         client = setup(
             make, lambda b: {"tiles": [EAST], "overview": True} if b.startswith("170") else {"tiles": [WEST]}
         )
-        assert client.search_places(Bbox(170, 10, -170, 20)).overview is True
+        assert client.search_places(Bbox(170, 10, -170, 20), **OVERTURE).overview is True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any
 
 import pytest
@@ -12,9 +13,9 @@ TILE = "https://tiles.example/a.json"
 OK = place("a", "Alpha", [point(37.772, -122.412)])
 
 
-def build(records: list[Any], slug: Any = "overture-place") -> FakeServer:
+def build(records: list[Any], slug: Any = "overture-place", **tileset_fields: Any) -> FakeServer:
     tileset = overture([FakeTile(TILE, records)])
-    return FakeServer(tilesets=[FakeTileset(slug, tileset.collections, tileset.tiles)])
+    return FakeServer(tilesets=[FakeTileset(slug, tileset.collections, tileset.tiles, **tileset_fields)])
 
 
 class TestFakeServerConfiguration:
@@ -59,10 +60,36 @@ class TestFakeServerRequests:
         assert sorted(body) == ["attribution", "publishedAt", "records"]
         assert body["records"] == [{"value": OK, "importance": 3}]
 
+    def test_answers_get_place_with_exactly_uri_url_importance_value_and_attribution(self) -> None:
+        origin = OK["origin"]
+        path = f"/xrpc/org.atgeo.getPlace?uri={urllib.parse.quote(origin, safe='')}"
+        _, body = self.get(build([record(OK, 3)]), path)
+        assert sorted(body) == ["attribution", "importance", "uri", "url", "value"]
+        assert body["uri"] == origin
+        assert body["value"] == OK
+        assert body["importance"] == 3
+        assert body["attribution"] == [{"dataset": "overturemaps.org", "collection": "place"}]
+        _, bare = self.get(build([record(OK)]), path)
+        assert sorted(bare) == ["attribution", "uri", "url", "value"]
+
+    def test_answers_get_place_with_the_tilesets_collections_then_its_references(self) -> None:
+        references = [{"dataset": "z.example", "collection": "c"}, {"dataset": "a.example", "collection": "c"}]
+        fake = build([record(OK)], references=references)
+        _, body = self.get(fake, f"/xrpc/org.atgeo.getPlace?uri={urllib.parse.quote(OK['origin'], safe='')}")
+        assert body["attribution"] == [{"dataset": "overturemaps.org", "collection": "place"}, *references]
+        assert json.loads(fake.transport.get(TILE).body)["attribution"] == body["attribution"]
+
+    def test_emits_a_tilesets_overview_in_its_descriptor(self) -> None:
+        _, body = self.get(build([], overview={"records": 7}), "/xrpc/org.atgeo.describeTileset?slug=overture-place")
+        assert body["overview"] == {"records": 7}
+        _, bare = self.get(build([]), "/xrpc/org.atgeo.describeTileset?slug=overture-place")
+        assert "overview" not in bare
+
     def test_answers_describe_service_with_a_did_and_tilesets(self) -> None:
         _, body = self.get(build([]), "/xrpc/org.atgeo.describeService")
         assert body == {
             "did": "did:web:places.atgeo.org",
+            "maxTiles": 50,
             "tilesets": [
                 {"slug": "overture-place", "collections": [{"dataset": "overturemaps.org", "collection": "place"}]}
             ],

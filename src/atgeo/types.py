@@ -20,12 +20,12 @@ class Circle:
 
 @dataclass(frozen=True, slots=True)
 class Bbox:
-    """A box in degrees. ``min_lon > max_lon`` crosses the antimeridian."""
+    """A box in degrees. ``west > east`` crosses the antimeridian."""
 
-    min_lon: float
-    min_lat: float
-    max_lon: float
-    max_lat: float
+    west: float
+    south: float
+    east: float
+    north: float
 
 
 Region = Circle | Bbox
@@ -163,6 +163,9 @@ class SearchHit:
     a plain dict. ``hit.place.copy()`` is a fast top-level copy (a mutable ``dict``), which is all
     ``json.dumps`` needs (it does not take ``hit.place`` itself). ``dataclasses.asdict``,
     ``copy.deepcopy`` and ``pickle`` of a hit work.
+
+    ``collection`` is the collection ``origin`` names, found in the attribution of the tile the record came from
+    (contract §8): a frozen pair, or None when nothing matches.
     """
 
     origin: str | None
@@ -170,6 +173,7 @@ class SearchHit:
     importance: int | None
     distance: float
     score: float | None
+    collection: CollectionKey | None = None
 
     @property
     def name(self) -> str | None:
@@ -211,13 +215,19 @@ class TileFailure:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchResult:
     """A search's places. ``complete`` is False when any tile failed; ``tile_failures`` lists each, in tile URL
-    order, and ``tiles.failed`` is its length."""
+    order, and ``tiles.failed`` is its length.
+
+    ``attribution`` credits every collection whose data the used tiles hold, whether or not any of a tile's
+    records survived: one entry per (dataset, collection), the lowest tile URL's winning, sorted by dataset then
+    collection. Always a tuple, empty when no tile was used. Entries are immutable, so there is nothing to copy.
+    """
 
     places: list[SearchHit]
     complete: bool
     overview: bool
     tiles: TileCounts
     tile_failures: tuple[TileFailure, ...] = ()
+    attribution: tuple[Attribution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -227,6 +237,7 @@ class PlaceRecord:
     origin: str
     place: Mapping[str, Any]
     importance: int | None
+    attribution: tuple[Attribution, ...] = ()
 
     @property
     def name(self) -> str | None:
@@ -252,7 +263,29 @@ class ServedTileset:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ServiceDescription:
     did: str | None = None
+    max_tiles: int | None = None
     tilesets: tuple[ServedTileset, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollectionKey:
+    """The collection a hit belongs to: exactly its dataset and collection (contract §8)."""
+
+    dataset: str
+    collection: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Attribution:
+    """One collection's credit in a search result or a place (contract §1, §4.10): dataset and collection are
+    always strings, as the readers keep an entry only when both are. Immutable, ``licenses`` a tuple."""
+
+    dataset: str
+    collection: str
+    release: str | None = None
+    source: str | None = None
+    licenses: tuple[str, ...] | None = None
+    attribution: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,9 +328,17 @@ class Extent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TilesetOverview:
+    """A tileset's overview band: ``records`` is how many records it holds, when the server says."""
+
+    records: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Tileset:
     slug: str | None = None
     published_at: str | None = None
     extent: Extent | None = None
     collections: tuple[CollectionInfo, ...] = field(default=())
     references: tuple[CollectionAttribution, ...] | None = None
+    overview: TilesetOverview | None = None

@@ -40,6 +40,8 @@ def check(cond: object, message: str) -> None:
 def check_nearby(nearby: SearchResult) -> None:
     check(nearby.complete, f"{nearby.tiles.failed} tile(s) failed")
     check(nearby.places, "no places in region")
+    check(nearby.attribution, "no attribution for the tiles used")
+    check(all(h.collection is not None for h in nearby.places), "a hit names no collection")
     distances = [h.distance for h in nearby.places]
     check(
         all(d <= RADIUS for d in distances) and distances == sorted(distances),
@@ -54,7 +56,11 @@ def run_sync() -> None:
         check(served and served.slug, f"{DATASET}{f'/{COLLECTION}' if COLLECTION else ''} not served")
         assert served is not None
         assert served.slug is not None
-        log("sync", "describeService", f"{service.did}, {len(service.tilesets)} tileset(s)")
+        log(
+            "sync",
+            "describeService",
+            f"{service.did}, maxTiles {service.max_tiles}, {len(service.tilesets)} tileset(s)",
+        )
 
         tileset = client.describe_tileset(served.slug)
         check(
@@ -80,6 +86,7 @@ def run_sync() -> None:
     with AtgeoClient(SERVER) as fresh:
         record = fresh.get_place(named.origin)
         check(record.name == named.name, "getPlace returned another place")
+        check(record.attribution, "getPlace carries no attribution")
         log("sync", "getPlace", f"{named.origin} -> {record.name}")
 
 

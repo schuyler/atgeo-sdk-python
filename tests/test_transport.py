@@ -30,7 +30,7 @@ from atgeo.transport import HttpResponse
 
 from .conftest import Make
 from .fake_server import DEFAULT_SERVER, FakeServer, FakeTile, overture
-from .helpers import place, place_origin, point, record, tile_url
+from .helpers import OVERTURE, place, place_origin, point, record, tile_url
 
 REGION = Bbox(-122.42, 37.77, -122.41, 37.78)
 
@@ -52,29 +52,29 @@ def two_tiles(fail_tiles: list[str] | None = None, **opts: object) -> FakeServer
 
 class TestFailedTiles:
     def test_reports_a_complete_search(self, make: Make) -> None:
-        result = make(two_tiles()).search_places(REGION)
+        result = make(two_tiles()).search_places(REGION, **OVERTURE)
         assert result.complete is True
         assert result.tiles == TileCounts(fetched=2, failed=0)
 
     def test_returns_surviving_results_marked_incomplete_when_a_tile_answers_non_200(self, make: Make) -> None:
-        result = make(two_tiles([tile_url("b")])).search_places(REGION)
+        result = make(two_tiles([tile_url("b")])).search_places(REGION, **OVERTURE)
         assert result.complete is False
         assert result.tiles == TileCounts(fetched=1, failed=1)
         assert [h.origin for h in result.places] == [place_origin("a")]
 
     def test_returns_an_incomplete_result_when_a_tile_fetch_rejects(self, make: Make) -> None:
-        result = make(two_tiles(network_errors=[tile_url("a")])).search_places(REGION)
+        result = make(two_tiles(network_errors=[tile_url("a")])).search_places(REGION, **OVERTURE)
         assert result.complete is False
         assert result.tiles == TileCounts(fetched=1, failed=1)
         assert [h.origin for h in result.places] == [place_origin("b")]
 
     def test_does_not_retry_a_failed_tile(self, make: Make) -> None:
         fake = two_tiles([tile_url("b")])
-        make(fake).search_places(REGION)
+        make(fake).search_places(REGION, **OVERTURE)
         assert fake.requests.count(tile_url("b")) == 1
 
     def test_reports_every_tile_failed_without_throwing(self, make: Make) -> None:
-        result = make(two_tiles([tile_url("a"), tile_url("b")])).search_places(REGION)
+        result = make(two_tiles([tile_url("a"), tile_url("b")])).search_places(REGION, **OVERTURE)
         assert (result.places, result.complete, result.tiles) == ([], False, TileCounts(fetched=0, failed=2))
 
 
@@ -82,7 +82,7 @@ class TestTypedServerErrors:
     def test_surfaces_bbox_too_large_from_get_tiles(self, make: Make) -> None:
         fake = FakeServer(tiles_for=lambda _: {"error": "BboxTooLarge", "message": "bbox too large"})
         with pytest.raises(AtgeoError) as e:
-            make(fake).search_places(REGION)
+            make(fake).search_places(REGION, **OVERTURE)
         assert (e.value.code, e.value.status) == ("BboxTooLarge", 400)
 
     @pytest.mark.parametrize(
@@ -101,7 +101,7 @@ class TestTypedServerErrors:
 
     def test_surfaces_collection_not_found_from_get_tiles(self, make: Make) -> None:
         with pytest.raises(AtgeoError) as e:
-            make(FakeServer()).search_places(REGION, collection="nope")
+            make(FakeServer()).search_places(REGION, dataset="overturemaps.org", collection="nope")
         assert e.value.code == "CollectionNotFound"
 
     def test_surfaces_dataset_not_found_from_get_tiles(self, make: Make) -> None:
@@ -118,13 +118,13 @@ class TestTypedServerErrors:
             ),
         )
         with pytest.raises(AtgeoError) as e:
-            make(fake).search_places(Bbox(170, 10, -170, 20))
+            make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
         assert e.value.code == "BboxTooLarge", half
 
     def test_does_not_subdivide_after_bbox_too_large(self, make: Make) -> None:
         fake = FakeServer(tiles_for=lambda _: {"error": "BboxTooLarge", "message": "too large"})
         with pytest.raises(AtgeoError):
-            make(fake).search_places(REGION)
+            make(fake).search_places(REGION, **OVERTURE)
         assert len(fake.requests) == 1
 
 
@@ -136,7 +136,7 @@ def origin_and_path(url: str) -> str:
 class TestXrpcUrls:
     def test_defaults_to_places_atgeo_org(self, make: Make) -> None:
         fake = two_tiles()
-        make(fake).search_places(REGION)
+        make(fake).search_places(REGION, **OVERTURE)
         assert origin_and_path(fake.requests[0]) == f"{DEFAULT_SERVER}/xrpc/org.atgeo.getTiles"
         params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(fake.requests[0]).query))
         assert params == {"dataset": "overturemaps.org", "collection": "place", "bbox": "-122.42,37.77,-122.41,37.78"}
@@ -150,7 +150,7 @@ class TestXrpcUrls:
             ],
         )
         client = make(fake, server=base)
-        client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
         client.describe_service()
         client.describe_tileset("overture-place")
         with pytest.raises(AtgeoError):
@@ -190,7 +190,7 @@ class TestTileFailures:
     """Contract §4.4: each failed tile, with its kind, URL and status, in URL order."""
 
     def test_reports_no_failures_for_a_complete_search(self, make: Make) -> None:
-        result = make(two_tiles()).search_places(REGION)
+        result = make(two_tiles()).search_places(REGION, **OVERTURE)
         assert result.tile_failures == ()
 
     @pytest.mark.parametrize(
@@ -207,7 +207,7 @@ class TestTileFailures:
     )
     def test_reports_a_refused_url_without_a_request(self, make: Make, bad: str) -> None:
         fake = serving({bad: None, tile_url("a"): GOOD})
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert result.tile_failures == (TileFailure(url=bad, kind=TileFailureKind.REFUSED, status=None, error=_ANY),)
         assert isinstance(result.tile_failures[0].error, ValueError)
         assert result.tiles == TileCounts(fetched=1, failed=1)
@@ -216,7 +216,7 @@ class TestTileFailures:
     @pytest.mark.parametrize("status", [404, 500, 503])
     def test_reports_a_non_2xx_with_its_status(self, make: Make, status: int) -> None:
         body = b'{"error": "Upstream", "message": "no"}'
-        result = make(serving({tile_url("a"): HttpResponse(status, body)})).search_places(REGION)
+        result = make(serving({tile_url("a"): HttpResponse(status, body)})).search_places(REGION, **OVERTURE)
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.STATUS, status)
         assert isinstance(failure.error, AtgeoError)
@@ -237,14 +237,16 @@ class TestTileFailures:
     def test_reports_a_2xx_without_a_usable_payload_as_decode(
         self, make: Make, body: bytes, error: type[Exception]
     ) -> None:
-        result = make(serving({tile_url("a"): HttpResponse(200, body), tile_url("b"): GOOD})).search_places(REGION)
+        result = make(serving({tile_url("a"): HttpResponse(200, body), tile_url("b"): GOOD})).search_places(
+            REGION, **OVERTURE
+        )
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.DECODE, None)
         assert isinstance(failure.error, error)
         assert result.tiles == TileCounts(fetched=1, failed=1)
 
     def test_reports_a_network_error_as_transport(self, make: Make) -> None:
-        result = make(two_tiles(network_errors=[tile_url("a")])).search_places(REGION)
+        result = make(two_tiles(network_errors=[tile_url("a")])).search_places(REGION, **OVERTURE)
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.TRANSPORT, None)
         assert isinstance(failure.error, OSError)
@@ -259,7 +261,7 @@ class TestTileFailures:
                 raise raised[0]
             return None
 
-        result = make(two_tiles(answer=answer)).search_places(REGION)
+        result = make(two_tiles(answer=answer)).search_places(REGION, **OVERTURE)
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (tile_url("b"), TileFailureKind.TRANSPORT, None)
         assert failure.error is raised[0]
@@ -276,7 +278,7 @@ class TestTileFailures:
         }
         # b, the first of the fetched failures in URL order, answers last.
         fake = serving(tiles, network_errors=[tile_url("d")], delays={tile_url("b"): 0.1})
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert [(f.url, f.kind, f.status) for f in result.tile_failures] == [
             ("ftp://tiles.example/c.json", TileFailureKind.REFUSED, None),
             (tile_url("b"), TileFailureKind.STATUS, 502),
@@ -287,8 +289,8 @@ class TestTileFailures:
         assert result.complete is False
 
     def test_compares_failures_without_their_errors(self, make: Make) -> None:
-        first = make(two_tiles([tile_url("b")])).search_places(REGION)
-        second = make(two_tiles([tile_url("b")])).search_places(REGION)
+        first = make(two_tiles([tile_url("b")])).search_places(REGION, **OVERTURE)
+        second = make(two_tiles([tile_url("b")])).search_places(REGION, **OVERTURE)
         assert first.tile_failures[0].error is not second.tile_failures[0].error
         assert first == second
         a = TileFailure(url="u", kind=TileFailureKind.DECODE, status=None, error=ValueError("x"))
@@ -302,19 +304,19 @@ class TestTileFailures:
     ) -> None:
         # It parsed once when it was stored, so this cannot happen; the guard is there all the same.
         client = make(two_tiles())
-        client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
         engine = client.inner._engine
         with engine._lock:
             engine._parsed.replace({})  # else the memo answers without parsing
-        original = TileEntry.records
+        original = TileEntry.payload
 
-        def records(self: TileEntry) -> Any:
+        def payload(self: TileEntry) -> Any:
             if b"place:a" in self.body:
                 raise ValueError("unparsable")
             return original(self)
 
-        monkeypatch.setattr(TileEntry, "records", records)
-        result = client.search_places(REGION)
+        monkeypatch.setattr(TileEntry, "payload", payload)
+        result = client.search_places(REGION, **OVERTURE)
         assert [(f.url, f.kind) for f in result.tile_failures] == [(tile_url("a"), TileFailureKind.DECODE)]
         assert result.tiles == TileCounts(fetched=1, failed=1)
         assert client.fake.requests.count(tile_url("a")) == 1  # from the cache, not fetched again
@@ -347,7 +349,7 @@ class TestMalformedResponses:
     def test_reports_a_malformed_response_as_transport(self, make: Make, response: object, says: str) -> None:
         fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
         fake.responses[tile_url("a")] = response  # type: ignore[assignment]
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (tile_url("a"), TileFailureKind.TRANSPORT, None)
         assert isinstance(failure.error, TypeError)
@@ -368,13 +370,13 @@ class TestMalformedResponses:
         # Not stricter than the type allows (contract §14): HTTPStatus is an int, and a bytearray passes mypy.
         fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
         fake.responses[tile_url("a")] = response
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert result.tile_failures == ()
         assert result.tiles == TileCounts(fetched=2, failed=0)
 
     def test_reports_a_non_2xx_http_status_as_an_int(self, make: Make) -> None:
         fake = serving({tile_url("a"): HttpResponse(HTTPStatus.SERVICE_UNAVAILABLE, b"")})
-        [failure] = make(fake).search_places(REGION).tile_failures
+        [failure] = make(fake).search_places(REGION, **OVERTURE).tile_failures
         assert (failure.kind, failure.status, type(failure.status)) == (TileFailureKind.STATUS, 503, int)
 
     def test_takes_a_duck_typed_response(self, make: Make) -> None:
@@ -382,7 +384,7 @@ class TestMalformedResponses:
         Response = namedtuple("Response", ["status", "body"])
         fake = serving({tile_url("a"): GOOD, tile_url("b"): GOOD})
         fake.responses[tile_url("a")] = Response(200, GOOD.body)  # type: ignore[assignment]
-        result = make(fake).search_places(REGION)
+        result = make(fake).search_places(REGION, **OVERTURE)
         assert result.complete is True
         assert result.tiles == TileCounts(fetched=2, failed=0)
 
@@ -396,7 +398,7 @@ class TestWhatIsNotAFailedTile:
 
         monkeypatch.setattr(TileCache, "set", broken)
         with pytest.raises(RuntimeError, match="a bug in the cache"):
-            make(two_tiles()).search_places(REGION)
+            make(two_tiles()).search_places(REGION, **OVERTURE)
 
     @pytest.mark.parametrize("where", ["decode", "cache"])
     def test_fails_the_search_on_a_memory_error(self, make: Make, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
@@ -408,14 +410,14 @@ class TestWhatIsNotAFailedTile:
         else:
             monkeypatch.setattr(TileCache, "set", exhausted)
         with pytest.raises(MemoryError):
-            make(two_tiles()).search_places(REGION)
+            make(two_tiles()).search_places(REGION, **OVERTURE)
 
     def test_raises_cancelled_error_with_a_failed_tile_in_hand(self) -> None:
         fake = two_tiles(network_errors=[tile_url("a")], delays={tile_url("b"): 5})
 
         async def run() -> None:
             client = AsyncAtgeoClient(transport=fake.async_transport)
-            task = asyncio.create_task(client.search_places(REGION))
+            task = asyncio.create_task(client.search_places(REGION, **OVERTURE))
             while fake.in_flight == 0 or tile_url("a") not in fake.requests:
                 await asyncio.sleep(0.005)
             task.cancel()
@@ -438,7 +440,7 @@ class TestCancellationAndInterrupts:
         self, make: Make, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = make(two_tiles())
-        client.search_places(REGION)
+        client.search_places(REGION, **OVERTURE)
         engine = client.inner._engine
         with engine._lock:
             engine._parsed.replace({})  # else the memo answers without parsing
@@ -446,9 +448,9 @@ class TestCancellationAndInterrupts:
         def exhausted(self: TileEntry) -> Any:
             raise MemoryError
 
-        monkeypatch.setattr(TileEntry, "records", exhausted)
+        monkeypatch.setattr(TileEntry, "payload", exhausted)
         with pytest.raises(MemoryError):
-            client.search_places(REGION)
+            client.search_places(REGION, **OVERTURE)
 
     def test_fails_a_blocking_search_on_keyboard_interrupt_from_the_transport(self) -> None:
         def answer(url: str) -> HttpResponse | None:
@@ -457,7 +459,7 @@ class TestCancellationAndInterrupts:
             return None
 
         with pytest.raises(KeyboardInterrupt):
-            AtgeoClient(transport=two_tiles(answer=answer).transport).search_places(REGION)
+            AtgeoClient(transport=two_tiles(answer=answer).transport).search_places(REGION, **OVERTURE)
 
     def test_stays_cancelled_when_the_transport_turns_cancellation_into_an_error(self) -> None:
         # More tiles than workers: a worker that took the transport's error for a failed tile would claim the
@@ -482,7 +484,7 @@ class TestCancellationAndInterrupts:
 
         async def run() -> None:
             client = AsyncAtgeoClient(transport=Swallowing())
-            task = asyncio.create_task(client.search_places(REGION))
+            task = asyncio.create_task(client.search_places(REGION, **OVERTURE))
             await started.wait()
             task.cancel()
             start = time.monotonic()
@@ -511,7 +513,7 @@ class TestCancellationAndInterrupts:
                     raise TimeoutError("total timeout") from None
                 raise AssertionError("not cancelled")
 
-        result = asyncio.run(AsyncAtgeoClient(transport=TimingOut()).search_places(REGION))
+        result = asyncio.run(AsyncAtgeoClient(transport=TimingOut()).search_places(REGION, **OVERTURE))
         [failure] = result.tile_failures
         assert (failure.url, failure.kind) == (tile_url("a"), TileFailureKind.TRANSPORT)
         assert isinstance(failure.error, TimeoutError)
@@ -546,7 +548,7 @@ class TestTransportCancellingItsOwnRequest:
     def test_reports_it_as_a_transport_failure(self, escape: bool) -> None:
         urls = [tile_url(f"t{n}") for n in range(3)]
         transport = self.self_cancelling(urls, {urls[1]}, escape=escape)
-        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION))
+        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION, **OVERTURE))
         assert result.tiles == TileCounts(fetched=2, failed=1)
         [failure] = result.tile_failures
         assert (failure.url, failure.kind, failure.status) == (urls[1], TileFailureKind.TRANSPORT, None)
@@ -556,7 +558,7 @@ class TestTransportCancellingItsOwnRequest:
     def test_reports_every_tile_when_every_worker_is_cancelled(self) -> None:
         urls = [tile_url(f"t{n:02}") for n in range(MAX_TILES_IN_FLIGHT + 3)]
         transport = self.self_cancelling(urls, set(urls), escape=True)
-        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION))
+        result = asyncio.run(AsyncAtgeoClient(transport=transport).search_places(REGION, **OVERTURE))
         assert result.tiles == TileCounts(fetched=0, failed=len(urls))
         assert [f.url for f in result.tile_failures] == urls
         assert {f.kind for f in result.tile_failures} == {TileFailureKind.TRANSPORT}

@@ -185,10 +185,10 @@ def distance_to(loc: Located, lat: float, lon: float) -> float | None:
 
 def in_region(loc: Located, region: Region) -> bool:
     if isinstance(region, Bbox):
-        segments = lon_segments(region.min_lon, region.max_lon)
+        segments = lon_segments(region.west, region.east)
         if loc.point is not None:
-            return _covers(region.min_lat, region.max_lat, segments, loc.point[0], loc.point[1])
-        return loc.bbox is not None and _meets(loc.bbox, region.min_lat, region.max_lat, segments)
+            return _covers(region.south, region.north, segments, loc.point[0], loc.point[1])
+        return loc.bbox is not None and _meets(loc.bbox, region.south, region.north, segments)
     assert isinstance(region, Circle)
     d = distance_to(loc, region.lat, region.lon)
     return d is not None and d <= region.radius

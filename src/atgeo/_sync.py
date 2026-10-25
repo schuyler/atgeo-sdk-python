@@ -136,8 +136,8 @@ class AtgeoClient:
         self,
         region: Region,
         *,
+        dataset: str,
         text: str | None = None,
-        dataset: str | None = None,
         collection: str | None = None,
         sort: SortMode | str = SortMode.FUSED,
     ) -> SearchResult:
@@ -180,8 +180,8 @@ class AtgeoClient:
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
-            records = engine.memo(url, entry)
-            return (entry, records) if records is not None else engine.reparse(url, entry)
+            payload = engine.memo(url, entry)
+            return (entry, payload) if payload is not None else engine.reparse(url, entry)
         request = engine.tile_request(url)
         if isinstance(request, TileFailure):
             return request

@@ -2,6 +2,27 @@
 
 Where this port reads input differently from the TypeScript reference, within the freedoms the [port contract](https://github.com/schuyler/atgeo-sdk-js/blob/main/docs/port-contract.md) grants (§5, §14). A compliant server never sends any of these; they matter only for malformed data.
 
+This port is conformant to atgeo-sdk-js [`2710a14`](https://github.com/schuyler/atgeo-sdk-js/commit/2710a14ba7d9485ddb6c00975f396e95389ac419), the contract commit after the attribution revision (atgeo-sdk-js#43), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
+
+## Fixtures and the tests the fixtures can't be (contract §13)
+
+- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (which names the dataset and collection of each scenario) run as before.
+- `lenient-readers.json` runs in `tests/test_wire.py::TestLenientReaders`, against the five readers. The readers return dataclasses, which the runner turns into JSON terms (camelCase keys, `None` as a missing key, tuples as lists) and compares strictly, so `True` is not `1`.
+- `attribution-scenarios.json` runs in `tests/test_attribution.py`, against both clients, with a fresh client per scenario and a raw server: every `getTiles` answers the scenario's tile URLs in listed order, and a tile with a status and no body gets the default error body.
+- Tile arrival order, which a fixture can't express: the same file reruns every scenario with more than one tile with the lowest URL's response delayed longest, and checks that the server did see the tiles in reverse URL order.
+- Ordinal order above U+FFFF, which no fixture reaches: `TestOrdinalOrderAboveTheBmp` sorts attribution entries and picks a dedupe winner between tiles whose names differ only at U+10000 and U+FF61. Python compares strings by code point, which puts them the other way round, so attribution is sorted with the same UTF-16 key as tile URLs.
+- Warm searches, `get_place` from the cache and the copy rule are in `test_cache.py` and `test_client.py`.
+
+## Attribution and hit collections (contract §4.10, §8, §9)
+
+Where the reference copies the attribution it hands out, this port hands out immutable values: `SearchResult.attribution` and `PlaceRecord.attribution` are tuples of frozen `Attribution` entries whose `licenses` is a tuple, and `SearchHit.collection` is a frozen `CollectionKey`. Nothing an app does to them can reach the cache. The entry's `dataset` and `collection` are `str`, not optional, because the reader keeps an entry only when both are strings.
+
+A tile's attribution is read again from its body when a tile is parsed again, as its records are (§10), so a tile's size stays the length of its body.
+
+## A dataset that is not a string (contract §4.1)
+
+`dataset` is a required keyword-only argument, so leaving it out is Python's own `TypeError`, raised by the call itself. One that isn't a `str` is treated as missing and raises `TypeError` too, on the first line of the search and so before the region is checked. A `str` subclass such as a `StrEnum` member is a string. On the async client a missing argument fails when the method is called, and a wrong-typed one when the coroutine is awaited.
+
 ## Number parsing (contract §5)
 
 A coordinate that arrives as a string must be a decimal number and nothing else (`[+-]?(digits[.digits]|.digits)([eE][+-]?digits)?`, ASCII digits only) before it is parsed. Python's `float()` would accept far more: surrounding whitespace, `1_000`, Arabic-Indic digits, `inf`. The reference uses `parseFloat`, which reads a number off the front of whatever it gets.
