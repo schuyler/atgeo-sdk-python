@@ -10,12 +10,14 @@ from ._urllib3 import Urllib3Transport
 from .errors import AtgeoDecodingError, AtgeoError
 from .transport import AsyncTransport, BodyError, HttpResponse, RedirectError, Transport
 from .types import (
+    Attribution,
     Bbox,
     Box,
     CategoryCount,
     Circle,
     CollectionAttribution,
     CollectionInfo,
+    CollectionKey,
     CollectionRef,
     Extent,
     PlaceLocation,
@@ -44,6 +46,7 @@ __all__ = [
     "AtgeoClient",
     "AtgeoDecodingError",
     "AtgeoError",
+    "Attribution",
     "Bbox",
     "BodyError",
     "Box",
@@ -51,6 +54,7 @@ __all__ = [
     "Circle",
     "CollectionAttribution",
     "CollectionInfo",
+    "CollectionKey",
     "CollectionRef",
     "Extent",
     "HttpResponse",

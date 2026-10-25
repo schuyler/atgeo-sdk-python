@@ -256,6 +256,27 @@ class ServiceDescription:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class CollectionKey:
+    """The collection a hit belongs to: exactly its dataset and collection (contract §8)."""
+
+    dataset: str
+    collection: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Attribution:
+    """One collection's credit in a search result or a place (contract §1, §4.10): dataset and collection are
+    always strings, as the readers keep an entry only when both are. Immutable, ``licenses`` a tuple."""
+
+    dataset: str
+    collection: str
+    release: str | None = None
+    source: str | None = None
+    licenses: tuple[str, ...] | None = None
+    attribution: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CollectionAttribution:
     dataset: str | None = None
     collection: str | None = None

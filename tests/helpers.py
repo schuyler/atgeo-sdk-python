@@ -10,7 +10,7 @@ from typing import Any, Final
 
 import pytest
 
-from atgeo import Bbox, Circle, CollectionAttribution, CollectionRef, Region
+from atgeo import Attribution, Bbox, Circle, CollectionKey, Region
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -79,15 +79,15 @@ def xrpc(nsid: str, params: list[tuple[str, str]], server: str = "https://places
     return f"{server}/xrpc/{nsid}?{urllib.parse.urlencode(params)}"
 
 
-def attribution(entry: Mapping[str, Any]) -> CollectionAttribution:
-    """A CollectionAttribution from a wire-shaped entry: a missing key is None, and licenses a tuple."""
+def attribution(entry: Mapping[str, Any]) -> Attribution:
+    """A Attribution from a wire-shaped entry: a missing key is None, and licenses a tuple."""
     fields: dict[str, Any] = {k: tuple(v) if k == "licenses" else v for k, v in entry.items()}
-    return CollectionAttribution(**fields)
+    return Attribution(**fields)
 
 
-def collection_ref(pair: Mapping[str, str] | None) -> CollectionRef | None:
+def collection_key(pair: Mapping[str, str] | None) -> CollectionKey | None:
     """A hit's expected collection from its wire shape."""
-    return None if pair is None else CollectionRef(dataset=pair["dataset"], collection=pair["collection"])
+    return None if pair is None else CollectionKey(dataset=pair["dataset"], collection=pair["collection"])
 
 
 def region_of(r: Mapping[str, Any]) -> Region:
@@ -97,7 +97,7 @@ def region_of(r: Mapping[str, Any]) -> Region:
     return Circle(r["lat"], r["lon"], r["radius"])
 
 
-def assert_immutable(entries: Sequence[CollectionAttribution]) -> None:
+def assert_immutable(entries: Sequence[Attribution]) -> None:
     """The attribution an app is handed is its own to hold but not to change (contract §9): this port hands out
     immutable values, a tuple of frozen entries whose licenses are a tuple, where the reference copies."""
     assert isinstance(entries, tuple)

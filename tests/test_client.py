@@ -17,8 +17,10 @@ from atgeo import (
     AsyncAtgeoClient,
     AtgeoClient,
     AtgeoError,
+    Attribution,
     Bbox,
     Circle,
+    CollectionKey,
     PlaceRecord,
     Region,
     SortMode,
@@ -40,7 +42,7 @@ from .helpers import (
     assert_immutable,
     attribution,
     bbox_location,
-    collection_ref,
+    collection_key,
     place,
     place_origin,
     point,
@@ -90,7 +92,7 @@ class TestGetPlace:
             origin=self.origin,
             place=self.value,
             importance=80,
-            attribution=(CollectionAttribution(dataset="overturemaps.org", collection="place"),),
+            attribution=(Attribution(dataset="overturemaps.org", collection="place"),),
         )
 
     def test_returns_a_null_importance_when_the_server_gives_none(self, make: Make) -> None:
@@ -128,7 +130,7 @@ class TestGetPlace:
             origin="https://example.org/r/u",
             place=uri_only,
             importance=4,
-            attribution=(CollectionAttribution(dataset="overturemaps.org", collection="place"),),
+            attribution=(Attribution(dataset="overturemaps.org", collection="place"),),
         )
 
     # getPlace carries attribution as served (contract §9): from the cache, the attribution of the tile that
@@ -532,12 +534,12 @@ class TestDatasetsAndCollections:
         places = client.search_places(REGION, dataset="openstreetmap.org").places
         by_origin = {h.origin: h.collection for h in places}
         assert by_origin == {
-            "urn:atgeo:openstreetmap.org:node:1": CollectionRef(dataset="openstreetmap.org", collection="node"),
-            "urn:atgeo:openstreetmap.org:way:2": CollectionRef(dataset="openstreetmap.org", collection="way"),
-            "urn:atgeo:openstreetmap.org:relation:3": CollectionRef(dataset="openstreetmap.org", collection="relation"),
+            "urn:atgeo:openstreetmap.org:node:1": CollectionKey(dataset="openstreetmap.org", collection="node"),
+            "urn:atgeo:openstreetmap.org:way:2": CollectionKey(dataset="openstreetmap.org", collection="way"),
+            "urn:atgeo:openstreetmap.org:relation:3": CollectionKey(dataset="openstreetmap.org", collection="relation"),
             "https://example.org/r/u": None,
         }
-        assert all(type(c) is CollectionRef for c in by_origin.values() if c is not None)
+        assert all(type(c) is CollectionKey for c in by_origin.values() if c is not None)
         assert all(hasattr(h, "collection") for h in places)
 
     def test_gives_way_and_wayside_hits_their_own_collections(self, make: Make) -> None:
@@ -552,8 +554,8 @@ class TestDatasetsAndCollections:
         )
         places = make(fake).search_places(REGION, dataset="openstreetmap.org").places
         assert {h.origin: h.collection for h in places} == {
-            "urn:atgeo:openstreetmap.org:way:2": collection_ref({"dataset": "openstreetmap.org", "collection": "way"}),
-            "urn:atgeo:openstreetmap.org:wayside:9": collection_ref(
+            "urn:atgeo:openstreetmap.org:way:2": collection_key({"dataset": "openstreetmap.org", "collection": "way"}),
+            "urn:atgeo:openstreetmap.org:wayside:9": collection_key(
                 {"dataset": "openstreetmap.org", "collection": "wayside"}
             ),
         }
@@ -590,8 +592,8 @@ class TestDatasetsAndCollections:
     def test_gives_a_hit_a_fresh_pair_not_the_attribution_entry(self, make: Make) -> None:
         fake = self.osm_tileset(record(osm("way", "1", 37.771)))
         (hit,) = make(fake).search_places(REGION, dataset="openstreetmap.org").places
-        assert hit.collection == CollectionRef(dataset="openstreetmap.org", collection="way")
-        assert type(hit.collection) is CollectionRef  # the entry, with its release and licenses, is another type
+        assert hit.collection == CollectionKey(dataset="openstreetmap.org", collection="way")
+        assert type(hit.collection) is CollectionKey  # the entry, with its release and licenses, is another type
         assert {f.name for f in dataclasses.fields(hit.collection)} == {"dataset", "collection"}
 
     def test_returns_the_union_of_the_tiles_attribution_references_included_sorted(self, make: Make) -> None:
@@ -622,13 +624,9 @@ class TestDatasetsAndCollections:
         )
         result = make(fake).search_places(REGION, dataset="openstreetmap.org", collection="way")
         assert result.attribution == (
-            CollectionAttribution(
-                dataset="openstreetmap.org", collection="node", source="https://www.openstreetmap.org"
-            ),
-            CollectionAttribution(dataset="openstreetmap.org", collection="relation"),
-            CollectionAttribution(
-                dataset="openstreetmap.org", collection="way", release="2026-01-01", licenses=(odbl,)
-            ),
+            Attribution(dataset="openstreetmap.org", collection="node", source="https://www.openstreetmap.org"),
+            Attribution(dataset="openstreetmap.org", collection="relation"),
+            Attribution(dataset="openstreetmap.org", collection="way", release="2026-01-01", licenses=(odbl,)),
         )
 
     def test_gives_an_empty_attribution_tuple_when_no_tile_was_used(self, make: Make) -> None:

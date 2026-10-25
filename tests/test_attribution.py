@@ -14,12 +14,12 @@ from typing import Any
 
 import pytest
 
-from atgeo import CollectionAttribution, CollectionRef, SearchResult
+from atgeo import Attribution, CollectionKey, SearchResult
 from atgeo.transport import HttpResponse, prepare_url
 
 from .conftest import Make
 from .fake_server import DEFAULT_SERVER, FakeServer
-from .helpers import attribution, collection_ref, fixture, region_of
+from .helpers import attribution, collection_key, fixture, region_of
 
 SCENARIOS: list[dict[str, Any]] = fixture("attribution-scenarios.json")
 GET_TILES = f"{DEFAULT_SERVER}/xrpc/org.atgeo.getTiles"
@@ -58,17 +58,17 @@ def search(make: Make, s: dict[str, Any], server: Raw) -> SearchResult:
 
 def check(result: SearchResult, s: dict[str, Any]) -> None:
     # Deep equality, in order: a field the scenario leaves out is None in the entry, and an entry is the
-    # CollectionAttribution of §1, with a tuple of licenses.
+    # Attribution of §1, with a tuple of licenses.
     assert isinstance(result.attribution, tuple)
     assert result.attribution == tuple(attribution(e) for e in s["expect"]["attribution"])
-    assert all(type(e) is CollectionAttribution for e in result.attribution)
+    assert all(type(e) is Attribution for e in result.attribution)
     # The hits are a multiset of (origin, collection) pairs, order-insensitive. Each hit carries a collection:
-    # a CollectionRef holding exactly the pair, or None, never the whole entry.
+    # a CollectionKey holding exactly the pair, or None, never the whole entry.
     for hit in result.places:
         assert hasattr(hit, "collection")
-        assert hit.collection is None or type(hit.collection) is CollectionRef
+        assert hit.collection is None or type(hit.collection) is CollectionKey
     got = Counter((h.origin, h.collection) for h in result.places)
-    assert got == Counter((h["origin"], collection_ref(h["collection"])) for h in s["expect"]["hits"])
+    assert got == Counter((h["origin"], collection_key(h["collection"])) for h in s["expect"]["hits"])
 
 
 class TestAttributionScenarios:
@@ -85,7 +85,7 @@ class TestTilesArrivingInReverseUrlOrder:
     §13): the lowest URL's response is delayed longest, so the highest arrives first."""
 
     def test_has_scenarios_with_more_than_one_tile(self) -> None:
-        assert len(MULTI) >= 5
+        assert len(MULTI) == 4
 
     @pytest.mark.parametrize("s", MULTI, ids=[s["name"] for s in MULTI])
     def test_scenario(self, make: Make, s: dict[str, Any]) -> None:

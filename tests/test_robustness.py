@@ -16,10 +16,10 @@ from atgeo import (
     AtgeoClient,
     AtgeoDecodingError,
     AtgeoError,
+    Attribution,
     Bbox,
     Circle,
-    CollectionAttribution,
-    CollectionRef,
+    CollectionKey,
     PlaceRecord,
     TileCounts,
     TileFailureKind,
@@ -203,8 +203,8 @@ class TestTileAttribution:
         entries = [None, 5, {"dataset": "d"}, {"dataset": "overturemaps.org", "collection": "place"}]
         result = self.search(make, {"records": [self.good], "attribution": entries})
         assert result.complete
-        assert result.attribution == (CollectionAttribution(dataset="overturemaps.org", collection="place"),)
-        assert result.places[0].collection == CollectionRef(dataset="overturemaps.org", collection="place")
+        assert result.attribution == (Attribution(dataset="overturemaps.org", collection="place"),)
+        assert result.places[0].collection == CollectionKey(dataset="overturemaps.org", collection="place")
 
     def test_reads_each_field_of_an_entry_on_its_own(self, make: Make) -> None:
         entry = {
@@ -218,7 +218,7 @@ class TestTileAttribution:
         }
         result = self.search(make, {"records": [], "attribution": [entry]})
         assert result.attribution == (
-            CollectionAttribution(dataset="overturemaps.org", collection="place", source="s", licenses=("l",)),
+            Attribution(dataset="overturemaps.org", collection="place", source="s", licenses=("l",)),
         )
 
     def test_gives_a_tile_that_failed_to_decode_no_attribution_though_its_body_has_some(self, make: Make) -> None:
@@ -295,8 +295,8 @@ class TestOtherBodies:
             place={"name": "X"},
             importance=3,
             attribution=(
-                CollectionAttribution(dataset="d", collection="c", licenses=("l",)),
-                CollectionAttribution(dataset="d", collection="c"),  # duplicates kept, an unreadable entry dropped
+                Attribution(dataset="d", collection="c", licenses=("l",)),
+                Attribution(dataset="d", collection="c"),  # duplicates kept, an unreadable entry dropped
             ),
         )
 

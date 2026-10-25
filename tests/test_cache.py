@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from atgeo import Bbox, CollectionAttribution, CollectionRef, PlaceRecord, SearchHit, SearchResult
+from atgeo import Attribution, Bbox, CollectionKey, PlaceRecord, SearchHit, SearchResult
 from atgeo.transport import HttpResponse
 from atgeo.types import _ReadOnlyMapping
 
@@ -150,7 +150,7 @@ class TestGetPlaceCacheScan:
             origin=place_origin("a"),
             place=place("a", "Alpha", [point(37.772, -122.412)]),
             importance=3,
-            attribution=(CollectionAttribution(dataset="overturemaps.org", collection="place"),),
+            attribution=(Attribution(dataset="overturemaps.org", collection="place"),),
         )
 
     def test_answers_offline_for_a_cached_origin(self, make: Make) -> None:
@@ -214,7 +214,7 @@ class TestAttributionInTheTileCache:
         assert len(first.attribution) > 0
         assert len(first.places) > 0
         for hit in first.places:
-            assert hit.collection == CollectionRef(dataset="overturemaps.org", collection="place")
+            assert hit.collection == CollectionKey(dataset="overturemaps.org", collection="place")
         fake.go_offline()
         second = client.search_places(REGION, **OVERTURE)
         assert second.attribution == first.attribution
@@ -367,7 +367,7 @@ class TestAttributionIsTheAppsOwn:
         with pytest.raises(dataclasses.FrozenInstanceError):
             hit.collection.collection = "changed"
         again = client.search_places(REGION, **OVERTURE).places[0]
-        assert again.collection == CollectionRef(dataset="overturemaps.org", collection="place")
+        assert again.collection == CollectionKey(dataset="overturemaps.org", collection="place")
 
 
 class TestParsedTileMemo:

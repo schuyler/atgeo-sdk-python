@@ -28,6 +28,7 @@ from atgeo._wire import (
 )
 from atgeo.errors import AtgeoDecodingError
 from atgeo.types import (
+    Attribution,
     CategoryCount,
     CollectionAttribution,
     CollectionInfo,
@@ -219,7 +220,7 @@ class TestTilePayloads:
     def test_reads_the_attribution_beside_the_records_and_none_when_it_is_not_an_array(self) -> None:
         entry = '{"dataset": "d", "collection": "c", "licenses": ["l", 1], "release": 5}'
         payload = read_tile_payload(j('{"records": [], "attribution": [' + entry + ', {"dataset": "d"}, null]}'))
-        assert payload.attribution == (CollectionAttribution(dataset="d", collection="c", licenses=("l",)),)
+        assert payload.attribution == (Attribution(dataset="d", collection="c", licenses=("l",)),)
         assert read_tile_payload(j('{"records": [], "attribution": []}')).attribution == ()
         for text in ('{"records": []}', '{"records": [], "attribution": {}}', '{"records": [], "attribution": null}'):
             assert read_tile_payload(j(text)).attribution is None
