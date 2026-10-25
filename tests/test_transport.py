@@ -308,14 +308,14 @@ class TestTileFailures:
         engine = client.inner._engine
         with engine._lock:
             engine._parsed.replace({})  # else the memo answers without parsing
-        original = TileEntry.records
+        original = TileEntry.payload
 
-        def records(self: TileEntry) -> Any:
+        def payload(self: TileEntry) -> Any:
             if b"place:a" in self.body:
                 raise ValueError("unparsable")
             return original(self)
 
-        monkeypatch.setattr(TileEntry, "records", records)
+        monkeypatch.setattr(TileEntry, "payload", payload)
         result = client.search_places(REGION, **OVERTURE)
         assert [(f.url, f.kind) for f in result.tile_failures] == [(tile_url("a"), TileFailureKind.DECODE)]
         assert result.tiles == TileCounts(fetched=1, failed=1)
@@ -448,7 +448,7 @@ class TestCancellationAndInterrupts:
         def exhausted(self: TileEntry) -> Any:
             raise MemoryError
 
-        monkeypatch.setattr(TileEntry, "records", exhausted)
+        monkeypatch.setattr(TileEntry, "payload", exhausted)
         with pytest.raises(MemoryError):
             client.search_places(REGION, **OVERTURE)
 

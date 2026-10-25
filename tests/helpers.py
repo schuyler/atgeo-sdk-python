@@ -80,7 +80,7 @@ def xrpc(nsid: str, params: list[tuple[str, str]], server: str = "https://places
 
 
 def attribution(entry: Mapping[str, Any]) -> Attribution:
-    """A Attribution from a wire-shaped entry: a missing key is None, and licenses a tuple."""
+    """An Attribution from a wire-shaped entry: a missing key is None, and licenses a tuple."""
     fields: dict[str, Any] = {k: tuple(v) if k == "licenses" else v for k, v in entry.items()}
     return Attribution(**fields)
 

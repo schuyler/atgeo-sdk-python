@@ -20,12 +20,12 @@ class Circle:
 
 @dataclass(frozen=True, slots=True)
 class Bbox:
-    """A box in degrees. ``min_lon > max_lon`` crosses the antimeridian."""
+    """A box in degrees. ``west > east`` crosses the antimeridian."""
 
-    min_lon: float
-    min_lat: float
-    max_lon: float
-    max_lat: float
+    west: float
+    south: float
+    east: float
+    north: float
 
 
 Region = Circle | Bbox
@@ -170,6 +170,7 @@ class SearchHit:
     importance: int | None
     distance: float
     score: float | None
+    collection: CollectionKey | None = None
 
     @property
     def name(self) -> str | None:
@@ -211,13 +212,19 @@ class TileFailure:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchResult:
     """A search's places. ``complete`` is False when any tile failed; ``tile_failures`` lists each, in tile URL
-    order, and ``tiles.failed`` is its length."""
+    order, and ``tiles.failed`` is its length.
+
+    ``attribution`` credits every collection whose data the used tiles hold, whether or not any of a tile's
+    records survived: one entry per (dataset, collection), the lowest tile URL's winning, sorted by dataset then
+    collection. Always a tuple, empty when no tile was used. Entries are immutable, so there is nothing to copy.
+    """
 
     places: list[SearchHit]
     complete: bool
     overview: bool
     tiles: TileCounts
     tile_failures: tuple[TileFailure, ...] = ()
+    attribution: tuple[Attribution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -227,6 +234,7 @@ class PlaceRecord:
     origin: str
     place: Mapping[str, Any]
     importance: int | None
+    attribution: tuple[Attribution, ...] = ()
 
     @property
     def name(self) -> str | None:
@@ -252,6 +260,7 @@ class ServedTileset:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ServiceDescription:
     did: str | None = None
+    max_tiles: int | None = None
     tilesets: tuple[ServedTileset, ...] = ()
 
 
@@ -316,9 +325,17 @@ class Extent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TilesetOverview:
+    """A tileset's overview band: ``records`` is how many records it holds, when the server says."""
+
+    records: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Tileset:
     slug: str | None = None
     published_at: str | None = None
     extent: Extent | None = None
     collections: tuple[CollectionInfo, ...] = field(default=())
     references: tuple[CollectionAttribution, ...] | None = None
+    overview: TilesetOverview | None = None

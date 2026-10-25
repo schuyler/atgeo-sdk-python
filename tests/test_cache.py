@@ -365,7 +365,7 @@ class TestAttributionIsTheAppsOwn:
         hit = client.search_places(REGION, **OVERTURE).places[0]
         assert hit.collection is not None
         with pytest.raises(dataclasses.FrozenInstanceError):
-            hit.collection.collection = "changed"
+            hit.collection.collection = "changed"  # type: ignore[misc]
         again = client.search_places(REGION, **OVERTURE).places[0]
         assert again.collection == CollectionKey(dataset="overturemaps.org", collection="place")
 

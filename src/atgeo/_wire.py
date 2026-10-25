@@ -17,6 +17,7 @@ from typing import Any, TypeVar
 from ._locations import record_key
 from .errors import AtgeoDecodingError, AtgeoError
 from .types import (
+    Attribution,
     CategoryCount,
     CollectionAttribution,
     CollectionInfo,
@@ -25,6 +26,7 @@ from .types import (
     ServedTileset,
     ServiceDescription,
     Tileset,
+    TilesetOverview,
 )
 
 _T = TypeVar("_T")
@@ -39,6 +41,23 @@ class TileRecord:
     value: Mapping[str, Any]
     uri: str | None = None
     importance: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TilePayload:
+    """A tile's usable records, and its attribution: None when the payload has none that is an array."""
+
+    records: list[TileRecord]
+    attribution: tuple[Attribution, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceBody:
+    """What getPlace answered: the value, the importance, and the attribution (empty unless an array)."""
+
+    value: dict[str, Any]
+    importance: int | None
+    attribution: tuple[Attribution, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +135,36 @@ def read_tile_list(body: object) -> TileList:
     return TileList([t for t in tiles if type(t) is str], overview)
 
 
-def read_tile_payload(body: object) -> list[TileRecord]:
-    """A tile's usable records. Raises (a failed tile) only when there is no records list at all."""
+def read_attribution(entries: list[Any]) -> tuple[Attribution, ...]:
+    """An attribution list as served (contract §1): an element is kept only if it is an object whose dataset
+    and collection are both strings; each other field is read on its own. Served order, duplicates kept."""
+    out = []
+    for e in entries:
+        if type(e) is not dict:
+            continue
+        dataset, collection = e.get("dataset"), e.get("collection")
+        if type(dataset) is not str or type(collection) is not str:
+            continue
+        licenses = e.get("licenses")
+        out.append(
+            Attribution(
+                dataset=dataset,
+                collection=collection,
+                release=_str(e, "release"),
+                source=_str(e, "source"),
+                licenses=tuple(x for x in licenses if type(x) is str) if type(licenses) is list else None,
+                attribution=_str(e, "attribution"),
+            )
+        )
+    return tuple(out)
+
+
+def read_tile_payload(body: object) -> TilePayload:
+    """A tile's usable records and attribution. Raises (a failed tile) only when there is no records list at all."""
     records = body.get("records") if type(body) is dict else None
     if type(records) is not list:
         raise AtgeoDecodingError("tile has no records list")
+    assert type(body) is dict
     out = []
     for r in records:
         if type(r) is not dict:
@@ -130,20 +174,26 @@ def read_tile_payload(body: object) -> list[TileRecord]:
             continue
         uri = r.get("uri")
         out.append(TileRecord(value, uri if type(uri) is str else None, importance_of(r.get("importance"))))
-    return out
+    attribution = body.get("attribution")
+    return TilePayload(out, read_attribution(attribution) if type(attribution) is list else None)
 
 
 def record_keys(records: list[TileRecord]) -> frozenset[str]:
     return frozenset(k for r in records if (k := record_key(r.value, r.uri)) is not None)
 
 
-def read_place(body: object) -> tuple[dict[str, Any], int | None]:
-    """getPlace's record and importance; ``uri`` is not read."""
-    record = body.get("record") if type(body) is dict else None
-    if type(record) is not dict:
-        raise AtgeoDecodingError("getPlace response has no record object")
+def read_place(body: object) -> PlaceBody:
+    """getPlace's value, importance and attribution; ``uri`` and ``url`` are not read."""
+    value = body.get("value") if type(body) is dict else None
+    if type(value) is not dict:
+        raise AtgeoDecodingError("getPlace response has no value object")
     assert type(body) is dict
-    return record, importance_of(body.get("importance"))
+    attribution = body.get("attribution")
+    return PlaceBody(
+        value,
+        importance_of(body.get("importance")),
+        read_attribution(attribution) if type(attribution) is list else (),
+    )
 
 
 # The describe types.
@@ -210,10 +260,19 @@ def _extent(o: Mapping[str, Any]) -> Extent | None:
     return Extent(north=_str(e, "north"), south=_str(e, "south"), east=_str(e, "east"), west=_str(e, "west"))
 
 
+def _overview(o: Mapping[str, Any]) -> TilesetOverview | None:
+    v = o.get("overview")
+    return TilesetOverview(records=importance_of(v.get("records"))) if type(v) is dict else None
+
+
 def read_service_description(body: object) -> ServiceDescription:
     if type(body) is not dict:
         raise AtgeoDecodingError("describeService response is not an object")
-    return ServiceDescription(did=_str(body, "did"), tilesets=_objects(body, "tilesets", _served_tileset) or ())
+    return ServiceDescription(
+        did=_str(body, "did"),
+        max_tiles=importance_of(body.get("maxTiles")),
+        tilesets=_objects(body, "tilesets", _served_tileset) or (),
+    )
 
 
 def read_tileset(body: object) -> Tileset:
@@ -225,4 +284,5 @@ def read_tileset(body: object) -> Tileset:
         extent=_extent(body),
         collections=_objects(body, "collections", _collection_info) or (),
         references=_objects(body, "references", _attribution),
+        overview=_overview(body),
     )

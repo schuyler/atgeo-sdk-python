@@ -409,7 +409,7 @@ class TestParsedTiles:
     def test_serves_a_memo_only_while_the_cache_holds_the_same_entry(self) -> None:
         memo = ParsedTiles()
         e1, e2 = entry("k"), entry("k")
-        records = e1.records()
+        records = e1.payload()
         memo.replace({"a": (e1, records)})
         assert memo.get("a", e1) is records
         assert memo.get("a", e2) is None

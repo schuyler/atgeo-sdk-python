@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Generic, TypeVar
 
 from ._text import utf16
-from ._wire import TileRecord, parse_body, read_tile_payload
+from ._wire import TilePayload, parse_body, read_tile_payload
 
 TTL_SECONDS = 3600.0
 
@@ -30,7 +30,8 @@ class TileEntry:
     def size(self) -> int:
         return len(self.body)
 
-    def records(self) -> list[TileRecord]:
+    def payload(self) -> TilePayload:
+        """The tile's records and attribution, parsed again from the body (contract §10)."""
         # The body parsed once already, when it was stored, so this cannot fail on its contents.
         return read_tile_payload(parse_body(self.body))
 
@@ -82,18 +83,18 @@ class TileCache:
 
 
 class ParsedTiles:
-    """The parsed records of the latest search's tiles, kept outside the budget so that searching the same
-    region again with new text parses nothing. Used only while the cache holds the same entry object, so
+    """The parsed records and attribution of the latest search's tiles, kept outside the budget so that searching
+    the same region again with new text parses nothing. Used only while the cache holds the same entry object, so
     what is fetched, and when, and the recency order are exactly as without it."""
 
     def __init__(self) -> None:
-        self._tiles: dict[str, tuple[TileEntry, list[TileRecord]]] = {}
+        self._tiles: dict[str, tuple[TileEntry, TilePayload]] = {}
 
-    def get(self, url: str, entry: TileEntry) -> list[TileRecord] | None:
+    def get(self, url: str, entry: TileEntry) -> TilePayload | None:
         memo = self._tiles.get(url)
         return memo[1] if memo is not None and memo[0] is entry else None
 
-    def replace(self, tiles: dict[str, tuple[TileEntry, list[TileRecord]]]) -> None:
+    def replace(self, tiles: dict[str, tuple[TileEntry, TilePayload]]) -> None:
         self._tiles = tiles
 
 

@@ -33,6 +33,7 @@ from .types import (
     TileFailure,
     TileFailureKind,
     Tileset,
+    TilesetOverview,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ __all__ = [
     "TileFailure",
     "TileFailureKind",
     "Tileset",
+    "TilesetOverview",
     "Transport",
     "Urllib3Transport",
 ]

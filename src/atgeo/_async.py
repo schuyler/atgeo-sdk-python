@@ -106,8 +106,8 @@ class AsyncAtgeoClient:
         self,
         region: Region,
         *,
+        dataset: str,
         text: str | None = None,
-        dataset: str | None = None,
         collection: str | None = None,
         sort: SortMode | str = SortMode.FUSED,
     ) -> SearchResult:
@@ -194,9 +194,9 @@ class AsyncAtgeoClient:
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
         if entry is not None:
-            records = engine.memo(url, entry)
-            if records is not None:
-                return entry, records
+            payload = engine.memo(url, entry)
+            if payload is not None:
+                return entry, payload
             return await _in_thread(lambda: engine.reparse(url, entry))
         request = engine.tile_request(url)
         if isinstance(request, TileFailure):
