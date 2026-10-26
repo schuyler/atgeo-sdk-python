@@ -17,7 +17,7 @@ This port is conformant to atgeo-sdk-js [`754aa09`](https://github.com/schuyler/
 
 ## Match tiers (contract §7, §8)
 
-Prefix is `str.startswith`, which compares code points. A Python `str` holds no lone surrogate, so a code-point prefix and a UTF-16 prefix of the same whole tokens agree, and the fixture's `क` against `कि` passes without any code-unit step. Punctuation is any character whose `unicodedata.category` starts with `P`, so the Unicode version is the interpreter's, as for normalization. `name` and `location` on `SearchHit` and `PlaceRecord` are properties, not fields, and already read the name and location as §8 describes, with the lexicon's field names and frozen values; they needed no change.
+Prefixes are compared in UTF-16 code units (`startswith` on the tokens' `utf16` bytes), not code points: a `str` can hold a lone surrogate, which is a code-unit prefix of the astral character it would pair into (`"\ud83d"` begins `"😀"`) but not a code-point prefix of it. No fixture reaches this; `TestMatchTiers.test_prefix_is_in_utf16_code_units` pins it. The fixture's `क` against `कि` passes either way. Punctuation is any character whose `unicodedata.category` starts with `P`, so the Unicode version is the interpreter's, as for normalization. `name` and `location` on `SearchHit` and `PlaceRecord` are properties, not fields, and already read the name and location as §8 describes, with the lexicon's field names and frozen values; they needed no change.
 
 ## Attribution and hit collections (contract §4.10, §8, §9)
 

@@ -129,13 +129,13 @@ def _fold(word: str) -> list[str]:
 def match_tier(query: str, value: Mapping[str, Any]) -> int:
     """1 when every query token begins a token of one single name, else 2 (§7). ``query`` is already normalized.
 
-    A str prefix is a prefix in code points, which for a str is the same as in UTF-16 code units: a str holds
-    no lone surrogate to split a pair, and the tokens are whole strings."""
-    query_tokens = [t for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
+    Prefixes are compared in UTF-16 code units, as the reference does: a str can hold a lone surrogate, which
+    is a code-unit prefix of the astral character it would pair into but not a code-point prefix of it."""
+    query_tokens = [utf16(t) for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
     if not query_tokens:
         return 1
     for name in _names(value):
-        name_tokens = _fold(name)
+        name_tokens = [utf16(t) for t in _fold(name)]
         if all(any(n.startswith(q) for n in name_tokens) for q in query_tokens):
             return 1
     return 2

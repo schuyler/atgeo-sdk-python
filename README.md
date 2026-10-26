@@ -24,7 +24,7 @@ with AtgeoClient() as atgeo:
         print(credit.dataset, credit.collection, credit.licenses)
 ```
 
-Misspellings are fine; matching is fuzzy (words that match exactly rank first), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy (names whose words start with every query word rank first), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
 
 The async version is the same with `await`:
 
@@ -99,7 +99,7 @@ The methods are the same on both clients; on `AsyncAtgeoClient` they're coroutin
 |---|---|
 | `region` | Required. `Circle(lat, lon, radius)` with the radius in metres, or `Bbox(west, south, east, north)` in degrees. A circle is latitude first and a box longitude first (GeoJSON's order), so name the arguments. A bbox with `west > east` crosses the antimeridian. |
 | `dataset` | Required, such as `overturemaps.org`. There is no default. |
-| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. The rest rank in two tiers, exact words first; see below. |
+| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. The rest rank in two tiers, word-prefix matches first; see below. |
 | `collection` | Optional, such as `way`. Without it you search every collection of the dataset together. |
 | `sort` | `SortMode.FUSED` (default), `DISTANCE` or `SIMILARITY`, or the same as strings. |
 

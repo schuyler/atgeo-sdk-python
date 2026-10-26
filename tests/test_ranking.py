@@ -147,3 +147,9 @@ class TestMatchTiers:
         if "variants" in p:
             value["variants"] = p["variants"]
         assert match_tier(normalize(case["query"]), value) == case["tier"]
+
+    def test_prefix_is_in_utf16_code_units(self) -> None:
+        # A str can hold a lone surrogate. "\ud83d" is the first UTF-16 unit of 😀 (U+1F600), so it is a
+        # prefix of "😀" by code units, as the reference compares, though not by code points.
+        assert match_tier(normalize("\ud83d"), {"name": "😀 bar"}) == 1
+        assert match_tier(normalize("\ud83d"), {"name": "bar"}) == 2
