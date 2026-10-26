@@ -6,15 +6,16 @@ from typing import Any
 import pytest
 
 from atgeo._rank import rank, round3
-from atgeo._text import jaro_winkler, text_score
+from atgeo._text import jaro_winkler, match_tier, normalize, text_score
 from atgeo._wire import TileRecord
 from atgeo.types import Bbox, SortMode
 
 from .conftest import Make
-from .fake_server import FakeServer, FakeTile, overture
+from .fake_server import FakeServer, FakeTile, TilesFor, overture
 from .helpers import bbox_location, fixture, place, place_origin, point, record, region_of
 
 SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
+MATCH_TIERS: list[dict[str, Any]] = fixture("match-tiers.json")
 
 REGION = Bbox(-1, -1, 1, 1)
 
@@ -119,7 +120,10 @@ class TestRankingScenarios:
     @pytest.mark.parametrize("s", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
     def test_scenario(self, make: Make, s: dict[str, Any]) -> None:
         records = [record(r["value"], r["importance"]) for r in s["records"]]
-        fake = FakeServer(tilesets=[overture([FakeTile("https://places.atgeo.org/tiles/t0.json", records)])])
+        url = "https://places.atgeo.org/tiles/t0.json"
+        # "overview": true makes getTiles answer with an overview, so the overview drop is exercised (§8).
+        tiles_for: TilesFor | None = (lambda _b: {"tiles": [url], "overview": True}) if s.get("overview") else None
+        fake = FakeServer(tiles_for=tiles_for, tilesets=[overture([FakeTile(url, records)])])
         # Each scenario names the dataset and collection it is a search of (contract §8).
         kwargs: dict[str, Any] = {"dataset": s["dataset"], "collection": s["collection"], "text": s.get("text")}
         if "sort" in s:
@@ -133,3 +137,13 @@ class TestRankingScenarios:
             assert origin not in origins
         if not s["expect"]["top"]:
             assert origins == []
+
+
+class TestMatchTiers:
+    @pytest.mark.parametrize("case", MATCH_TIERS, ids=[c["name"] for c in MATCH_TIERS])
+    def test_case(self, case: dict[str, Any]) -> None:
+        p = case["place"]
+        value: dict[str, Any] = {"name": p["name"]}
+        if "variants" in p:
+            value["variants"] = p["variants"]
+        assert match_tier(normalize(case["query"]), value) == case["tier"]

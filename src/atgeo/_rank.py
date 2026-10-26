@@ -8,7 +8,7 @@ from typing import Any
 
 from ._locations import Located, distance_to, locate, record_key
 from ._region import center
-from ._text import JW_THRESHOLD, text_score, utf16
+from ._text import JW_THRESHOLD, match_tier, text_score, utf16
 from ._wire import TileRecord
 from .types import Attribution, CollectionKey, Region, SearchHit, SortMode, _ReadOnlyMapping
 
@@ -37,11 +37,16 @@ def _number(x: float) -> tuple[bool, float]:
 
 
 class _Hit:
-    __slots__ = ("hit", "spec")
+    __slots__ = ("hit", "spec", "tier")
 
-    def __init__(self, hit: SearchHit, spec: float) -> None:
+    def __init__(self, hit: SearchHit, spec: float, tier: int | None) -> None:
         self.hit = hit
         self.spec = spec
+        self.tier = tier  # 1 or 2 with text, None without (§7)
+
+
+def _by_tier(h: _Hit) -> int:
+    return h.tier or 0  # None ties with None; with text every hit has a tier, so the two never meet
 
 
 def _by_score(h: _Hit) -> float:
@@ -66,9 +71,9 @@ def _by_origin(h: _Hit) -> tuple[bool, bytes]:
 
 
 _ORDERS: dict[SortMode, tuple[Callable[[_Hit], object], ...]] = {
-    SortMode.FUSED: (_by_score, _by_importance, _by_distance, _by_origin),
-    SortMode.DISTANCE: (_by_distance, _by_specificity, _by_importance, _by_score, _by_origin),
-    SortMode.SIMILARITY: (_by_score, _by_distance, _by_origin),
+    SortMode.FUSED: (_by_tier, _by_score, _by_importance, _by_distance, _by_origin),
+    SortMode.DISTANCE: (_by_tier, _by_distance, _by_specificity, _by_importance, _by_score, _by_origin),
+    SortMode.SIMILARITY: (_by_tier, _by_score, _by_distance, _by_origin),
 }
 
 
@@ -90,8 +95,11 @@ def rank(
     query: str,
     sort: SortMode,
     attributions: Iterable[Sequence[Attribution]] | None = None,
+    *,
+    overview: bool = False,
 ) -> list[SearchHit]:
     """Score, drop poor matches, and sort. ``query`` is already normalized; "" means no text.
+    With text on an ``overview`` answer, tier-2 (fuzzy only) hits are dropped (§8).
 
     ``attributions``, when given, is the attribution of the tile each record came from, in step with ``records``."""
     lat, lon = center(region)
@@ -101,6 +109,9 @@ def rank(
         source = next(sources) if sources is not None else ()
         score = text_score(query, record.value) if query else None
         if score is not None and score < JW_THRESHOLD:
+            continue
+        tier = match_tier(query, record.value) if score is not None else None
+        if tier == 2 and overview:
             continue
         loc = locate(record.value)
         distance = distance_to(loc, lat, lon)
@@ -113,7 +124,7 @@ def rank(
             score=score,
             collection=collection_of(record.value, source),
         )
-        hits.append(_Hit(hit, specificity(loc)))
+        hits.append(_Hit(hit, specificity(loc), tier))
     keys = _ORDERS[sort]
     # list.sort is stable, so hits tied on every key keep their input order (contract §8).
     hits.sort(key=lambda h: tuple(k(h) for k in keys))

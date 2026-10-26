@@ -325,7 +325,12 @@ class Engine:
         sourced = [s for s in sourced if in_region(locate(s.value), plan.region)]
         return SearchResult(
             places=rank(
-                [s.record for s in sourced], plan.region, plan.query, plan.sort, [s.attribution for s in sourced]
+                [s.record for s in sourced],
+                plan.region,
+                plan.query,
+                plan.sort,
+                [s.attribution for s in sourced],
+                overview=overview,
             ),
             complete=not failures,
             overview=overview,

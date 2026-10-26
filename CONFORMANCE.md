@@ -2,16 +2,22 @@
 
 Where this port reads input differently from the TypeScript reference, within the freedoms the [port contract](https://github.com/schuyler/atgeo-sdk-js/blob/main/docs/port-contract.md) grants (§5, §14). A compliant server never sends any of these; they matter only for malformed data.
 
-This port is conformant to atgeo-sdk-js [`2710a14`](https://github.com/schuyler/atgeo-sdk-js/commit/2710a14ba7d9485ddb6c00975f396e95389ac419), the contract commit after the attribution revision (atgeo-sdk-js#43), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
+This port is conformant to atgeo-sdk-js [`754aa09`](https://github.com/schuyler/atgeo-sdk-js/commit/754aa0917d2839b489f0be3be60ac3b7530a52c7), the contract commit that added match tiers (atgeo-sdk-js#49), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
 
 ## Fixtures and the tests the fixtures can't be (contract §13)
 
-- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (which names the dataset and collection of each scenario) run as before.
+- `normalize.json` and `jaro-winkler.json` run as before.
+- `ranking-scenarios.json` (19 scenarios, which name the dataset and collection of each) runs in `tests/test_ranking.py`. A scenario with `"overview": true` makes the fake server answer `getTiles` with an overview.
+- `match-tiers.json` (36 cases) runs in `tests/test_ranking.py::TestMatchTiers`, against `atgeo._text.match_tier` on `normalize(query)` and a place built from `place.name` and `place.variants`.
 - `lenient-readers.json` runs in `tests/test_wire.py::TestLenientReaders`, against the five readers. The readers return dataclasses, which the runner turns into JSON terms (camelCase keys, `None` as a missing key, tuples as lists) and compares strictly, so `True` is not `1`.
 - `attribution-scenarios.json` runs in `tests/test_attribution.py`, against both clients, with a fresh client per scenario and a raw server: every `getTiles` answers the scenario's tile URLs in listed order, and a tile with a status and no body gets the default error body.
 - Tile arrival order, which a fixture can't express: the same file reruns every scenario with more than one tile with the lowest URL's response delayed longest, and checks that the server did see the tiles in reverse URL order.
 - Ordinal order above U+FFFF, which no fixture reaches: `TestOrdinalOrderAboveTheBmp` sorts attribution entries and picks a dedupe winner between tiles whose names differ only at U+10000 and U+FF61. Python compares strings by code point, which puts them the other way round, so attribution is sorted with the same UTF-16 key as tile URLs.
 - Warm searches, `get_place` from the cache and the copy rule are in `test_cache.py` and `test_client.py`.
+
+## Match tiers (contract §7, §8)
+
+Prefix is `str.startswith`, which compares code points. A Python `str` holds no lone surrogate, so a code-point prefix and a UTF-16 prefix of the same whole tokens agree, and the fixture's `क` against `कि` passes without any code-unit step. Punctuation is any character whose `unicodedata.category` starts with `P`, so the Unicode version is the interpreter's, as for normalization. `name` and `location` on `SearchHit` and `PlaceRecord` are properties, not fields, and already read the name and location as §8 describes, with the lexicon's field names and frozen values; they needed no change.
 
 ## Attribution and hit collections (contract §4.10, §8, §9)
 

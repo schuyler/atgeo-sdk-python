@@ -100,18 +100,42 @@ def _score_name(query: str, tokens: list[str], name: str) -> float:
     return 0.5 * jaro_winkler(query, name) + 0.5 * token_score
 
 
-def text_score(query: str, value: Mapping[str, Any]) -> float:
-    """The best score of the place's names against an already-normalized, non-empty query."""
-    tokens = query.split(" ")[:MAX_QUERY_TOKENS]
+def _names(value: Mapping[str, Any]) -> list[str]:
+    """The place's normalized, non-empty names: its own, then its variants' (§7)."""
     raw: list[object] = [value.get("name")]
     variants = value.get("variants")
     if type(variants) is list:
         raw.extend(v.get("name") for v in variants if type(v) is dict)
-    best = 0.0
-    for n in raw:
-        if type(n) is not str:
-            continue
-        name = normalize(n)
-        if name:
-            best = max(best, _score_name(query, tokens, name))
-    return best
+    names = (normalize(n) for n in raw if type(n) is str)
+    return [n for n in names if n]
+
+
+def text_score(query: str, value: Mapping[str, Any]) -> float:
+    """The best score of the place's names against an already-normalized, non-empty query."""
+    tokens = query.split(" ")[:MAX_QUERY_TOKENS]
+    return max((_score_name(query, tokens, name) for name in _names(value)), default=0.0)
+
+
+_APOSTROPHES = str.maketrans("", "", "\u0027\u2019\u02bc")
+
+
+def _fold(word: str) -> list[str]:
+    """Apostrophes vanish, other punctuation (general category P*) separates words (§7)."""
+    word = word.translate(_APOSTROPHES)
+    word = "".join(" " if unicodedata.category(ch).startswith("P") else ch for ch in word)
+    return [t for t in word.split(" ") if t]
+
+
+def match_tier(query: str, value: Mapping[str, Any]) -> int:
+    """1 when every query token begins a token of one single name, else 2 (§7). ``query`` is already normalized.
+
+    A str prefix is a prefix in code points, which for a str is the same as in UTF-16 code units: a str holds
+    no lone surrogate to split a pair, and the tokens are whole strings."""
+    query_tokens = [t for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
+    if not query_tokens:
+        return 1
+    for name in _names(value):
+        name_tokens = _fold(name)
+        if all(any(n.startswith(q) for n in name_tokens) for q in query_tokens):
+            return 1
+    return 2

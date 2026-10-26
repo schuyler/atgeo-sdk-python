@@ -24,7 +24,7 @@ with AtgeoClient() as atgeo:
         print(credit.dataset, credit.collection, credit.licenses)
 ```
 
-Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy (words that match exactly rank first), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
 
 The async version is the same with `await`:
 
@@ -99,7 +99,7 @@ The methods are the same on both clients; on `AsyncAtgeoClient` they're coroutin
 |---|---|
 | `region` | Required. `Circle(lat, lon, radius)` with the radius in metres, or `Bbox(west, south, east, north)` in degrees. A circle is latitude first and a box longitude first (GeoJSON's order), so name the arguments. A bbox with `west > east` crosses the antimeridian. |
 | `dataset` | Required, such as `overturemaps.org`. There is no default. |
-| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. |
+| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. The rest rank in two tiers, exact words first; see below. |
 | `collection` | Optional, such as `way`. Without it you search every collection of the dataset together. |
 | `sort` | `SortMode.FUSED` (default), `DISTANCE` or `SIMILARITY`, or the same as strings. |
 
@@ -174,7 +174,9 @@ What it shares with a dict: `==` in both directions (`hit.place == some_dict` an
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
-`FUSED` orders by similarity, breaking near-ties by importance, then distance. `DISTANCE` orders nearest first, then the smaller place, then importance, then similarity. `SIMILARITY` orders by similarity, then distance, and needs `text`. Scores are compared to three decimals and remaining ties break on `origin`, so the order is deterministic.
+With `text`, places that clear 0.6 rank in two tiers, whatever the sort mode. A place with a name (its own or a variant) that has every word of the query as the start of one of its words comes before one that matches only fuzzily. Apostrophes are ignored and other punctuation splits words, so `mcdonalds` finds `McDonald's` and `st louis` finds `St. Louis`. Within a tier, the sort mode decides. On an overview answer (`result.overview` is `True`), a search with `text` keeps only the first tier: fuzzy matches are dropped, since the coarse set can't hold the place you meant.
+
+`FUSED` orders by tier, then similarity, breaking near-ties by importance, then distance. `DISTANCE` orders by tier, then nearest first, then the smaller place, then importance, then similarity. `SIMILARITY` orders by tier, then similarity, then distance, and needs `text`. Scores are compared to three decimals and remaining ties break on `origin`, so the order is deterministic.
 
 The [JavaScript README](https://github.com/schuyler/atgeo-sdk-js#readme) has the long version: overview answers, places that appear in several tiles, and how ties are broken. All of it applies here unchanged.
 
