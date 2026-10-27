@@ -24,7 +24,7 @@ with AtgeoClient() as atgeo:
         print(credit.dataset, credit.collection, credit.licenses)
 ```
 
-Misspellings are fine; matching is fuzzy, and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy (words that match exactly rank first), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org has a limited dataset for now, mostly the east coast, so a search elsewhere may come back empty. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
 
 The async version is the same with `await`:
 
@@ -174,7 +174,9 @@ What it shares with a dict: `==` in both directions (`hit.place == some_dict` an
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
-`FUSED` orders by similarity, breaking near-ties by importance, then distance. `DISTANCE` orders nearest first, then the smaller place, then importance, then similarity. `SIMILARITY` orders by similarity, then distance, and needs `text`. Scores are compared to three decimals and remaining ties break on `origin`, so the order is deterministic.
+With text, places scoring below 0.6 are dropped, and the rest rank in two tiers whatever the sort: a place with a name (its own or a variant) that has every word of the query as the start of one of its words comes before one that matches only fuzzily. Apostrophes are ignored and other punctuation splits words, so `mcdonalds` finds `McDonald's` and `st louis` finds `St. Louis`. On an overview answer, only that first tier is kept: the coarse set can't hold the place you misspelled.
+
+Within a tier, `FUSED` orders by similarity, breaking near-ties by importance, then distance. `DISTANCE` orders nearest first, then the smaller place, then importance, then similarity. `SIMILARITY` orders by similarity, then distance, and needs `text`. Scores are compared to three decimals and remaining ties break on `origin`, so the order is deterministic.
 
 The [JavaScript README](https://github.com/schuyler/atgeo-sdk-js#readme) has the long version: overview answers, places that appear in several tiles, and how ties are broken. All of it applies here unchanged.
 

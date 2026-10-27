@@ -52,3 +52,16 @@ class TestOverviewAnswers:
             make, lambda b: {"tiles": [EAST], "overview": True} if b.startswith("170") else {"tiles": [WEST]}
         )
         assert client.search_places(Bbox(170, 10, -170, 20), **OVERTURE).overview is True
+
+    def test_drops_fuzzy_hits_from_both_halves_when_one_half_is_overview(self, make: Make) -> None:
+        tiles = [
+            FakeTile(EAST, [record(place("e", "Eastside Diner", [point(15, 175)]))]),
+            FakeTile(WEST, [record(place("w", "Eastsyde Grill", [point(15, -175)]))]),
+        ]
+        fake = FakeServer(
+            tilesets=[overture(tiles)],
+            tiles_for=lambda b: {"tiles": [EAST], "overview": True} if b.startswith("170") else {"tiles": [WEST]},
+        )
+        result = make(fake).search_places(Bbox(170, 10, -170, 20), text="eastside", **OVERTURE)
+        assert result.overview is True
+        assert [h.name for h in result.places] == ["Eastside Diner"]

@@ -2,11 +2,12 @@
 
 Where this port reads input differently from the TypeScript reference, within the freedoms the [port contract](https://github.com/schuyler/atgeo-sdk-js/blob/main/docs/port-contract.md) grants (§5, §14). A compliant server never sends any of these; they matter only for malformed data.
 
-This port is conformant to atgeo-sdk-js [`2710a14`](https://github.com/schuyler/atgeo-sdk-js/commit/2710a14ba7d9485ddb6c00975f396e95389ac419), the contract commit after the attribution revision (atgeo-sdk-js#43), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
+This port is conformant to atgeo-sdk-js [`754aa09`](https://github.com/schuyler/atgeo-sdk-js/commit/754aa0917d2839b489f0be3be60ac3b7530a52c7), the contract revision of atgeo-sdk-js#49 (match tiers, the overview drop, required `name` and `location`), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
 
 ## Fixtures and the tests the fixtures can't be (contract §13)
 
-- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (which names the dataset and collection of each scenario) run as before.
+- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (19 scenarios, which name the dataset and collection of each search) run as before. A scenario with `"overview": true` has the fake server answer `getTiles` with an overview, so the fuzzy drop runs.
+- `match-tiers.json` (36 cases) runs in `tests/test_ranking.py::TestMatchTiers`, on the normalized query and the case's place, through the same `match_tier` ranking uses.
 - `lenient-readers.json` runs in `tests/test_wire.py::TestLenientReaders`, against the five readers. The readers return dataclasses, which the runner turns into JSON terms (camelCase keys, `None` as a missing key, tuples as lists) and compares strictly, so `True` is not `1`.
 - `attribution-scenarios.json` runs in `tests/test_attribution.py`, against both clients, with a fresh client per scenario and a raw server: every `getTiles` answers the scenario's tile URLs in listed order, and a tile with a status and no body gets the default error body.
 - Tile arrival order, which a fixture can't express: the same file reruns every scenario with more than one tile with the lowest URL's response delayed longest, and checks that the server did see the tiles in reverse URL order.
@@ -74,6 +75,14 @@ The reference counts failed tiles but does not say which; this port lists each i
 The reference orders by subtracting (`a.distance - b.distance`), so a NaN distance compares as a tie with everything, and the resulting order depends on the engine's sort. Only out-of-range coordinates in place data (a latitude past ±90, which the contract keeps as parsed) can produce one. This port sorts a NaN after every number, as the Kotlin port does, and ties `-0` with `0` exactly as subtraction does.
 
 Such coordinates are also where Python's math library and JavaScript's part ways, and this port follows JavaScript each time: with a latitude past 90, haversine's intermediate can go negative, where `math.sqrt` raises and `Math.sqrt` returns NaN; `min()` skips a NaN that isn't its first argument, where `Math.min` returns NaN; and `math.fmod` raises on infinity, where `%` gives NaN. So the distance is NaN, as in the reference, rather than a number or a failed search.
+
+## Match tier (contract §7)
+
+The prefix test compares UTF-16 code units, as the contract asks, by encoding each folded word as it is for sorting. A Python `str` can hold a lone surrogate (`json.loads` makes one from `"\ud83d"`), and `str.startswith` compares code points, so a query ending in a lone high surrogate would not prefix a name holding the whole pair; here it does, as in the reference. The fixture's `क` against `कि` passes either way.
+
+Punctuation is `unicodedata.category()` starting with `P`, where the reference uses V8's `\p{P}`. Both follow the Unicode version of their runtime (see below for Python's); no fixture case differs on any supported version.
+
+`SearchHit.name`, `.location`, `PlaceRecord.name` and `.location` (contract §8, §9) were already here, computed on access from the place, so they cannot disagree with `distance`.
 
 ## Final sigma (contract §7)
 
