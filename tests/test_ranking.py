@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from atgeo._rank import rank, round3
-from atgeo._text import jaro_winkler, text_score
+from atgeo._text import jaro_winkler, match_tier, normalize, text_score
 from atgeo._wire import TileRecord
 from atgeo.types import Bbox, SortMode
 
@@ -15,6 +15,7 @@ from .fake_server import FakeServer, FakeTile, overture
 from .helpers import bbox_location, fixture, place, place_origin, point, record, region_of
 
 SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
+TIERS: list[dict[str, Any]] = fixture("match-tiers.json")
 
 REGION = Bbox(-1, -1, 1, 1)
 
@@ -115,11 +116,55 @@ class TestSortKeys:
         assert [h.importance for h in rank(recs, REGION, "", SortMode.FUSED)] == [2**62, -1]
 
 
+class TestMatchTiers:
+    def test_has_every_case(self) -> None:
+        assert len(TIERS) == 36
+
+    @pytest.mark.parametrize("c", TIERS, ids=[c["name"] for c in TIERS])
+    def test_case(self, c: dict[str, Any]) -> None:
+        # `place` is `{ name, variants? }`, with `variants` a list of `{ name }`: a place value as served.
+        assert match_tier(normalize(c["query"]), c["place"]) == c["tier"]
+
+    def test_prefixes_by_utf16_code_units(self) -> None:
+        # A query ending in a lone high surrogate prefixes the pair it starts; str.startswith says no.
+        assert match_tier("a\ud83d", {"name": "a\U0001f600"}) == 1
+        assert match_tier("a\ud83e", {"name": "a\U0001f600"}) == 2
+
+    def test_needs_every_word_in_one_name(self) -> None:
+        value = {"name": "Blue Bottle", "variants": [{"name": "Cafe"}]}
+        assert match_tier("blue cafe", value) == 2
+        assert match_tier("blue bot", value) == 1
+
+
+class TestTiers:
+    # "starbucks" scores well against both, but only one name has it word for word.
+    EXACT = place("exact", "Starbucks Reserve", [point(0.5, 0.5)])
+    FUZZY = place("fuzzy", "Starbux", [point(0, 0)])
+
+    @pytest.mark.parametrize("sort", list(SortMode))
+    def test_puts_tier_1_first_in_every_mode(self, sort: SortMode) -> None:
+        records = [TileRecord(self.FUZZY, importance=9), TileRecord(self.EXACT)]
+        assert [h.name for h in rank(records, REGION, "starbucks", sort)] == ["Starbucks Reserve", "Starbux"]
+
+    def test_drops_tier_2_from_an_overview_answer_with_text(self) -> None:
+        records = [TileRecord(self.FUZZY), TileRecord(self.EXACT)]
+        assert [h.name for h in rank(records, REGION, "starbucks", SortMode.FUSED, overview=True)] == [
+            "Starbucks Reserve"
+        ]
+
+    def test_drops_nothing_from_an_overview_answer_without_text(self) -> None:
+        records = [TileRecord(self.FUZZY), TileRecord(self.EXACT)]
+        assert len(rank(records, REGION, "", SortMode.FUSED, overview=True)) == 2
+
+
 class TestRankingScenarios:
     @pytest.mark.parametrize("s", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
     def test_scenario(self, make: Make, s: dict[str, Any]) -> None:
         records = [record(r["value"], r["importance"]) for r in s["records"]]
-        fake = FakeServer(tilesets=[overture([FakeTile("https://places.atgeo.org/tiles/t0.json", records)])])
+        url = "https://places.atgeo.org/tiles/t0.json"
+        # A scenario may say its getTiles answer is an overview, which exercises the fuzzy drop (contract §8).
+        tiles_for = (lambda _b: {"tiles": [url], "overview": True}) if s.get("overview") else None
+        fake = FakeServer(tilesets=[overture([FakeTile(url, records)])], tiles_for=tiles_for)
         # Each scenario names the dataset and collection it is a search of (contract §8).
         kwargs: dict[str, Any] = {"dataset": s["dataset"], "collection": s["collection"], "text": s.get("text")}
         if "sort" in s:

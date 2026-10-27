@@ -100,18 +100,42 @@ def _score_name(query: str, tokens: list[str], name: str) -> float:
     return 0.5 * jaro_winkler(query, name) + 0.5 * token_score
 
 
-def text_score(query: str, value: Mapping[str, Any]) -> float:
-    """The best score of the place's names against an already-normalized, non-empty query."""
-    tokens = query.split(" ")[:MAX_QUERY_TOKENS]
+def _names(value: Mapping[str, Any]) -> list[str]:
+    """A place's normalized, non-empty ``name`` and ``variants[].name``: what a query is scored and tiered against."""
     raw: list[object] = [value.get("name")]
     variants = value.get("variants")
     if type(variants) is list:
         raw.extend(v.get("name") for v in variants if type(v) is dict)
-    best = 0.0
-    for n in raw:
-        if type(n) is not str:
-            continue
-        name = normalize(n)
-        if name:
-            best = max(best, _score_name(query, tokens, name))
-    return best
+    return [name for n in raw if type(n) is str and (name := normalize(n))]
+
+
+def text_score(query: str, value: Mapping[str, Any]) -> float:
+    """The best score of the place's names against an already-normalized, non-empty query."""
+    tokens = query.split(" ")[:MAX_QUERY_TOKENS]
+    return max((_score_name(query, tokens, name) for name in _names(value)), default=0.0)
+
+
+_APOSTROPHES = str.maketrans("", "", "'\u2019\u02bc")
+
+
+def _fold(word: str) -> list[bytes]:
+    """The words of a normalized name or query word for tier matching (contract §7), as UTF-16 sort keys:
+    apostrophes vanish, and each run of punctuation (general category P*) separates words. Symbols do not."""
+    spaced = "".join(" " if unicodedata.category(c)[0] == "P" else c for c in word.translate(_APOSTROPHES))
+    return [utf16(t) for t in spaced.split(" ") if t]
+
+
+def match_tier(query: str, value: Mapping[str, Any]) -> int:
+    """1 if every query word begins a word of one single name, else 2 (contract §7); 1 for a query that folds to
+    no words. ``query`` is already normalized and non-empty; call it for a record that scored at least 0.6.
+
+    The prefix test is on UTF-16 code units, as the contract asks, so a query ending in a lone high surrogate
+    prefixes a name holding the whole pair, where ``str.startswith`` would say no."""
+    words = [t for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
+    if not words:
+        return 1
+    for name in _names(value):
+        name_words = _fold(name)
+        if all(any(n.startswith(q) for n in name_words) for q in words):
+            return 1
+    return 2
