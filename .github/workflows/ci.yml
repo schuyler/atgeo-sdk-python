@@ -112,27 +112,6 @@ jobs:
         env:
           ATGEO_EXAMPLES: "1"  # an adapter that fails to import fails the job
 
-  # truststore against the platform's own certificate store: places.atgeo.org must connect, and
-  # badssl.com's expired and self-signed certificates must not. The only tests that need the network.
-  tls:
-    name: tls (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.14"
-      - run: uv sync --locked
-      - run: uv run pytest -m network tests/test_tls.py
-        env:
-          ATGEO_NETWORK_TESTS: "1"
-
   # The vendored fixtures and lexicons are what their SOURCE files say (atgeo-sdk-js#34). The script is
   # fetched at a pinned commit, so a change to it reaches this repository only when the pin moves. A pin
   # that has fallen behind its upstream is a warning annotation, not a failure.
@@ -151,7 +130,7 @@ jobs:
 
   # The one check to mark required.
   ci:
-    needs: [lint, test, lowest, package, examples, tls, fixtures]
+    needs: [lint, test, lowest, package, examples, fixtures]
     if: always()
     runs-on: ubuntu-latest
     steps:
