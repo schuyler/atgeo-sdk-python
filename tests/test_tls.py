@@ -1,71 +1,61 @@
-"""truststore against the platform's certificate store. The only tests that need the network: CI's tls job
-runs them with ATGEO_NETWORK_TESTS=1 (pytest -m network); everywhere else they are skipped."""
+"""Both default transports verify certificates against the operating system's trust store. Whether that store
+refuses a bad certificate is truststore's and the platform's business; this checks only that the SDK uses it."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import ssl
+from typing import Any
 
+import aiohttp
 import pytest
+import truststore
+import urllib3
 
 from atgeo import AiohttpTransport, Urllib3Transport
-from atgeo.transport import HttpResponse
-
-pytestmark = [
-    pytest.mark.network,
-    pytest.mark.skipif(os.environ.get("ATGEO_NETWORK_TESTS") != "1", reason="needs the network: ATGEO_NETWORK_TESTS=1"),
-]
-
-SERVICE = "https://places.atgeo.org/xrpc/org.atgeo.describeService?"
-BAD = ["https://expired.badssl.com/", "https://self-signed.badssl.com/"]
+from atgeo._tls import default_ssl_context
 
 
-def fetch(kind: str, url: str) -> HttpResponse:
-    if kind == "urllib3":
-        t = Urllib3Transport()
-        try:
-            return t.get(url)
-        finally:
-            t.close()
-
-    async def run() -> HttpResponse:
-        a = AiohttpTransport()
-        try:
-            return await a.get(url)
-        finally:
-            await a.aclose()
-
-    return asyncio.run(run())
+def test_the_default_context_verifies_against_the_os_store() -> None:
+    context = default_ssl_context()
+    assert isinstance(context, truststore.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
 
 
-@pytest.mark.parametrize("kind", ["urllib3", "aiohttp"])
-def test_reaches_places_atgeo_org(kind: str) -> None:
-    response = fetch(kind, SERVICE)
-    assert response.status == 200
-    assert "did" in json.loads(response.body)
+@pytest.mark.parametrize("given", [None, ssl.create_default_context()])
+def test_urllib3_uses_the_context_directly_and_through_a_proxy(
+    given: ssl.SSLContext | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    t = Urllib3Transport(ssl_context=given)
+    try:
+        direct = t._direct.connection_pool_kw["ssl_context"]
+        via = t._pool_for("https://places.atgeo.org/")
+        assert isinstance(via, urllib3.ProxyManager)
+        assert via.connection_pool_kw["ssl_context"] is direct
+        assert via.proxy_ssl_context is direct
+        assert direct is given if given is not None else isinstance(direct, truststore.SSLContext)
+    finally:
+        t.close()
 
 
-def is_certificate_error(e: BaseException) -> bool:
-    """Whether a certificate verification failure is anywhere in the error's chain (urllib3 keeps it in
-    MaxRetryError.reason, aiohttp in certificate_error), so that a DNS failure cannot pass for a refusal."""
-    seen: set[int] = set()
-    todo: list[object] = [e]
-    while todo:
-        x = todo.pop()
-        if not isinstance(x, BaseException) or id(x) in seen:
-            continue
-        seen.add(id(x))
-        if isinstance(x, ssl.SSLCertVerificationError):
-            return True
-        todo += [x.__cause__, x.__context__, getattr(x, "reason", None), getattr(x, "certificate_error", None), *x.args]
-    return False
+@pytest.mark.parametrize("given", [None, ssl.create_default_context()])
+def test_aiohttp_uses_the_context(given: ssl.SSLContext | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+    real = aiohttp.TCPConnector
 
+    def spy(*args: Any, **kwargs: Any) -> aiohttp.TCPConnector:
+        seen.append(kwargs.get("ssl"))
+        return real(*args, **kwargs)
 
-@pytest.mark.parametrize("url", BAD)
-@pytest.mark.parametrize("kind", ["urllib3", "aiohttp"])
-def test_refuses_a_bad_certificate(kind: str, url: str) -> None:
-    with pytest.raises(Exception) as e:  # noqa: PT011  (each library raises its own TLS error)
-        fetch(kind, url)
-    assert is_certificate_error(e.value), repr(e.value)
+    monkeypatch.setattr(aiohttp, "TCPConnector", spy)
+
+    async def run() -> None:
+        t = AiohttpTransport(ssl_context=given)
+        t._session_for_running_loop()
+        await t.aclose()
+
+    asyncio.run(run())
+    [context] = seen
+    assert context is given if given is not None else isinstance(context, truststore.SSLContext)

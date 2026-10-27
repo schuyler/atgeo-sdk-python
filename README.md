@@ -238,7 +238,7 @@ uv run mypy
 ATGEO_SERVER=http://localhost:8000 uv run python scripts/e2e.py
 ```
 
-The end-to-end script runs both clients, and needs a server that answers `getPlace` with `value` and `attribution` ([schuyler/garganorn#27](https://github.com/schuyler/garganorn/issues/27)); against an older garganorn it fails at `get_place`, which is the point. It takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one. `ATGEO_NETWORK_TESTS=1 uv run pytest -m network` runs the TLS tests against places.atgeo.org and badssl.com.
+The end-to-end script runs both clients, and needs a server that answers `getPlace` with `value` and `attribution` ([schuyler/garganorn#27](https://github.com/schuyler/garganorn/issues/27)); against an older garganorn it fails at `get_place`, which is the point. It takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one.
 
 `tests/fixtures/` holds the shared fixtures, copied from atgeo-sdk-js at the commit named in `SOURCE`, and the garganorn lexicons, with their own `SOURCE`.
 
