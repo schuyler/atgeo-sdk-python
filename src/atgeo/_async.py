@@ -119,6 +119,9 @@ class KeywordAutocomplete:
         if previous is not None:
             previous.cancel()  # a call that is already done ignores this
         self._client._engine.check_keyword(keyword, "search_by_keyword")
+        if not qualifies(keyword):
+            # No request is made, so there is nothing for a cancelled caller to stop (contract §19, §11).
+            return KeywordSearchResult(places=[], attribution=(), disclosed=Disclosure(keyword=False, region=None))
         # The work is a task of its own, which the next call cancels. Awaiting it keeps the caller's
         # cancellation reaching the request: cancelling a task that awaits another cancels that one too.
         task = asyncio.get_running_loop().create_task(self._run(keyword))
@@ -126,8 +129,6 @@ class KeywordAutocomplete:
         return await task
 
     async def _run(self, keyword: str) -> KeywordSearchResult:
-        if not qualifies(keyword):
-            return KeywordSearchResult(places=[], attribution=(), disclosed=Disclosure(keyword=False, region=None))
         try:
             return await self._client.search_by_keyword(
                 keyword, dataset=self._dataset, collection=self._collection, region=self._region
