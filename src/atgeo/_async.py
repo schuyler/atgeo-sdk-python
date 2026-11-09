@@ -106,7 +106,7 @@ class KeywordAutocomplete:
 
         Every keyword that qualifies (two or more characters in a word, after case, accents and punctuation are
         removed) goes to the server as typed, prefixes included. The server keeps no log of it (garganorn's
-        privacy design), though a hostile operator could record what it receives. Debouncing reduces how many
+        privacy design); a hostile operator can record what it receives. Debouncing reduces how many
         prefixes go out; it is the app's choice, and this does not debounce. A keyword that cannot qualify
         makes no request and returns an empty result that disclosed nothing.
 

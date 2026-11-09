@@ -2,7 +2,7 @@
 
 Where this port reads input differently from the TypeScript reference, within the freedoms the [port contract](https://github.com/schuyler/atgeo-sdk-js/blob/main/docs/port-contract.md) grants (§5, §14). A compliant server never sends any of these; they matter only for malformed data.
 
-This port is conformant to atgeo-sdk-js [`fc56331`](https://github.com/schuyler/atgeo-sdk-js/commit/fc5633103e5ef195c1f9e6e96213e33ce56058ad), the contract pinned to the squash merge of atgeo-sdk-js#63 (`3d68e5e`: `search_nearby` and the keyword methods, `disclosed`, the tier-1 and tier-2 thresholds, `KeywordRequired`, aborted requests), with the garganorn lexicons at [`59d21b1`](https://github.com/schuyler/garganorn/commit/59d21b117f4a01f9f459fc83c2624b53c6cf503a), which add `searchPlaces`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
+This port is conformant to atgeo-sdk-js [`fc56331`](https://github.com/schuyler/atgeo-sdk-js/commit/fc5633103e5ef195c1f9e6e96213e33ce56058ad), the contract pinned to the squash merge of atgeo-sdk-js#55 (`97c776b`: `search_nearby` and the keyword methods, `disclosed`, the tier-1 and tier-2 thresholds, `KeywordRequired`, aborted requests), with the garganorn lexicons at [`59d21b1`](https://github.com/schuyler/garganorn/commit/59d21b117f4a01f9f459fc83c2624b53c6cf503a), which add `searchPlaces`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
 
 ## Fixtures and the tests the fixtures can't be (contract §13)
 
@@ -103,7 +103,7 @@ Argument errors follow the contract's table for Python: `TypeError` for a missin
 
 `search_nearby_then_by_keyword` always returns a `FallbackSearchResult`, where the reference returns the nearby result object itself when it skips the keyword request. The two are separate frozen dataclasses here, so the nearby result's fields are copied into a `FallbackSearchResult` (`places` as a new list holding the same hits), and its `disclosed` is the nearby result's own.
 
-The autocompleter exists on the async client only, as the contract allows. Its calls run as `asyncio.Task`s the next call cancels, so a superseded call raises `asyncio.CancelledError` while `task.cancelling()` in its caller is 0. A call that finds the keyword cannot qualify also runs as a task, so it supersedes the previous call as well. The blocking client has no autocompleter, and no cancellation but `KeyboardInterrupt`, which stops the call before its next request.
+The autocompleter exists on the async client only, as the contract allows. Its calls run as `asyncio.Task`s the next call cancels, so a superseded call raises `asyncio.CancelledError` while `task.cancelling()` in its caller is 0. A call whose keyword cannot qualify supersedes the previous call first, then returns the empty result without a task, so it resolves even for a caller that has already been cancelled: no request is made, so there is nothing to stop (§19 step 3, §11). The blocking client has no autocompleter, and no cancellation but `KeyboardInterrupt`, which stops the call before its next request.
 
 `search_by_keyword`'s answer is parsed on the client's own threads, as every other response is, so deeply nested JSON cannot overflow the caller's stack.
 
