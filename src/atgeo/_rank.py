@@ -8,9 +8,9 @@ from typing import Any
 
 from ._locations import Located, distance_to, locate, record_key
 from ._region import center
-from ._text import JW_THRESHOLD, match_tier, text_score, utf16
+from ._text import FUZZY_THRESHOLD, JW_THRESHOLD, query_tokens, text_score, tier_of, utf16
 from ._wire import TileRecord
-from .types import Attribution, CollectionKey, Region, SearchHit, SortMode, _ReadOnlyMapping
+from .types import Attribution, CollectionKey, NearbyHit, Region, SortMode, _ReadOnlyMapping
 
 _RAD = math.pi / 180
 
@@ -39,7 +39,7 @@ def _number(x: float) -> tuple[bool, float]:
 class _Hit:
     __slots__ = ("hit", "spec", "tier")
 
-    def __init__(self, hit: SearchHit, spec: float, tier: int | None) -> None:
+    def __init__(self, hit: NearbyHit, spec: float, tier: int | None) -> None:
         self.hit = hit
         self.spec = spec
         self.tier = tier  # 1 or 2 with text, None without (contract §7)
@@ -97,26 +97,32 @@ def rank(
     attributions: Iterable[Sequence[Attribution]] | None = None,
     *,
     overview: bool = False,
-) -> list[SearchHit]:
-    """Score, drop poor matches, and sort. ``query`` is already normalized; "" means no text. With text on an
-    ``overview`` answer, tier-2 (fuzzy only) hits are dropped.
+) -> list[NearbyHit]:
+    """Score, drop poor matches, and sort. ``query`` is already normalized; "" means no text. A tier-1 (word) match
+    is kept at any score, a tier-2 (fuzzy only) one needs 0.8, and a query whose words all fold away needs 0.6
+    (contract §7). With text on an ``overview`` answer, tier-2 hits are dropped.
 
     ``attributions``, when given, is the attribution of the tile each record came from, in step with ``records``."""
     lat, lon = center(region)
+    # The tokens are the query's alone: folded once. A query with text and no tokens (``&``) makes every record
+    # tier 1, so it keeps the old threshold.
+    tokens = query_tokens(query) if query else []
+    wordless = bool(query) and not tokens
     hits: list[_Hit] = []
     sources = iter(attributions) if attributions is not None else None
     for record in records:
         source = next(sources) if sources is not None else ()
         score = text_score(query, record.value) if query else None
-        if score is not None and score < JW_THRESHOLD:
+        tier = tier_of(tokens, record.value) if score is not None else None
+        if score is not None and score < (JW_THRESHOLD if wordless else FUZZY_THRESHOLD if tier == 2 else 0):
             continue
-        tier = match_tier(query, record.value) if score is not None else None
         if overview and tier == 2:
             continue
         loc = locate(record.value)
         distance = distance_to(loc, lat, lon)
         assert distance is not None  # the region filter already required a location
-        hit = SearchHit(
+        hit = NearbyHit(
+            via="tiles",
             origin=record_key(record.value, record.uri),
             place=_ReadOnlyMapping(record.value),  # a read-only view of the cache's own dict, not a copy
             importance=record.importance,

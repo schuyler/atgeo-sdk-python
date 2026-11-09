@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Generic, Self, TypeVar
+from typing import Generic, Literal, Self, TypeVar
 
 from ._engine import (
     DEFAULT_CACHE_BUDGET_BYTES,
@@ -20,9 +20,12 @@ from ._threads import start_daemon
 from ._wire import TileList
 from .transport import Transport
 from .types import (
+    Bbox,
+    FallbackSearchResult,
+    KeywordSearchResult,
+    NearbySearchResult,
     PlaceRecord,
     Region,
-    SearchResult,
     ServiceDescription,
     SortMode,
     TileFailure,
@@ -132,7 +135,7 @@ class AtgeoClient:
             transport = Urllib3Transport()
         self._transport = transport
 
-    def search_places(
+    def search_nearby(
         self,
         region: Region,
         *,
@@ -140,16 +143,18 @@ class AtgeoClient:
         text: str | None = None,
         collection: str | None = None,
         sort: SortMode | str = SortMode.FUSED,
-    ) -> SearchResult:
+    ) -> NearbySearchResult:
         """Search a region; the text, and the precise region, never leave the device (README, Privacy)."""
         engine = self._engine
         plan = engine.plan(region, text, dataset, collection, sort)
+        sent = threading.Event()  # whether the server was asked for anything about the area (§4.11)
 
         lists: list[TileList | None] = [engine.cached_tile_list(r.key) for r in plan.lists]
         missing = [r for r, cached in zip(plan.lists, lists, strict=True) if cached is None]
         if missing:
 
             def fetch_list(r: TileListRequest) -> TileList:
+                sent.set()
                 return engine.store_tile_list(r.key, self._transport.get(r.url))
 
             pool: _Pool[TileListRequest, TileList] = _Pool(missing, fetch_list, len(missing), fail_fast=True)
@@ -161,7 +166,7 @@ class AtgeoClient:
         urls = engine.tile_urls(ready)
         # A failed tile is an outcome, not an exception: anything a worker raises fails the search, and
         # the pool stops claiming tiles as soon as one does.
-        tiles: _Pool[str, Outcome] = _Pool(urls, self._tile, MAX_TILES_IN_FLIGHT, fail_fast=True)
+        tiles: _Pool[str, Outcome] = _Pool(urls, lambda url: self._tile(url, sent), MAX_TILES_IN_FLIGHT, fail_fast=True)
         try:
             tiles.wait()
         except KeyboardInterrupt:
@@ -173,9 +178,51 @@ class AtgeoClient:
             exhausted = [v for r in tiles.results if r is not None and isinstance(v := r[1], MemoryError)]
             raise exhausted[0] if exhausted else e  # noqa: B904
         outcomes: list[Outcome] = [_value(result) for result in tiles.results]  # type: ignore[misc]
-        return returned(engine.assemble(plan, urls, outcomes, any(tile_list.overview for tile_list in ready)))
+        overview = any(tile_list.overview for tile_list in ready)
+        return returned(engine.assemble(plan, urls, outcomes, overview, sent.is_set()))
 
-    def _tile(self, url: str) -> Outcome:
+    def search_by_keyword(
+        self,
+        keyword: str,
+        *,
+        dataset: str,
+        collection: str | None = None,
+        region: Bbox | None = None,
+    ) -> KeywordSearchResult:
+        """Ask the server for places whose names match the keyword. This sends the keyword (README, Privacy); the
+        region, a box only, goes snapped outward to whole degrees."""
+        engine = self._engine
+        plan = engine.plan_keyword(keyword, dataset, collection, region)
+        return _on_worker(lambda: engine.read_keyword(plan, self._transport.get(plan.url)))
+
+    def search_nearby_then_by_keyword(
+        self,
+        region: Region,
+        *,
+        dataset: str,
+        keyword: str,
+        keyword_region: Literal["none", "degree"],
+        collection: str | None = None,
+        sort: SortMode | str = SortMode.FUSED,
+    ) -> FallbackSearchResult:
+        """A nearby search with the keyword as its text, and, only if that finds no word match, a keyword request.
+        A failure after the nearby half means the keyword may have reached the server (README, Privacy)."""
+        engine = self._engine
+        engine.check_fallback(dataset, keyword, keyword_region)
+        nearby = self.search_nearby(region, dataset=dataset, text=keyword, collection=collection, sort=sort)
+        if not engine.fallback_wants_keyword(keyword, nearby):
+            return engine.fallback_result(nearby, None)
+        try:
+            found = self.search_by_keyword(
+                keyword, dataset=dataset, collection=collection, region=engine.keyword_region(region, keyword_region)
+            )
+        except Exception as e:
+            if not engine.is_keyword_required(e):
+                raise
+            return engine.refused_keyword(nearby, keyword_region)
+        return engine.fallback_result(nearby, found)
+
+    def _tile(self, url: str, sent: threading.Event) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
@@ -184,7 +231,8 @@ class AtgeoClient:
             return (entry, payload) if payload is not None else engine.reparse(url, entry)
         request = engine.tile_request(url)
         if isinstance(request, TileFailure):
-            return request
+            return request  # refused: nothing was asked of the server
+        sent.set()
         try:
             response = engine.check_response(self._transport.get(request))
         except MemoryError:

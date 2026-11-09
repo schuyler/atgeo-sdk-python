@@ -21,7 +21,7 @@ def id_of(origin: str | None) -> str:
 
 def search(make: Make, records: list[dict[str, Any]], region: Region) -> list[str]:
     fake = FakeServer(tilesets=[overture([FakeTile(url("t"), [record(v) for v in records])])])
-    return sorted(id_of(h.origin) for h in make(fake).search_places(region, **OVERTURE).places)
+    return sorted(id_of(h.origin) for h in make(fake).search_nearby(region, **OVERTURE).places)
 
 
 DIVISION = {"dataset": "overturemaps.org", "collection": "division"}
@@ -55,14 +55,14 @@ class TestDeduplication:
                 )
             ]
         )
-        result = make(fake).search_places(self.region, **OVERTURE)
+        result = make(fake).search_nearby(self.region, **OVERTURE)
         assert sorted(id_of(h.origin) for h in result.places) == ["a-only", "b-only", "dup"]
 
     def test_keeps_the_first_tiles_copy_in_the_default_order_too(self, make: Make) -> None:
         fake = FakeServer(
             tilesets=[overture([FakeTile(url("a"), [record(self.first)]), FakeTile(url("b"), [record(self.second)])])]
         )
-        assert [h.name for h in make(fake).search_places(self.region, **OVERTURE).places] == ["First copy"]
+        assert [h.name for h in make(fake).search_nearby(self.region, **OVERTURE).places] == ["First copy"]
 
     def test_merges_a_division_record_held_by_two_tiles_into_one_hit(self, make: Make) -> None:
         fake = FakeServer(
@@ -75,7 +75,7 @@ class TestDeduplication:
                 )
             ]
         )
-        result = make(fake).search_places(self.region, dataset="overturemaps.org", collection="division")
+        result = make(fake).search_nearby(self.region, dataset="overturemaps.org", collection="division")
         assert len(result.places) == 1
         assert result.places[0].origin == "urn:atgeo:overturemaps.org:division:d1"
 
@@ -97,7 +97,7 @@ class TestDeduplication:
             ],
             tiles_for=lambda bbox: [url(east_name) if bbox.startswith("170") else url(west_name)],
         )
-        result = make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
+        result = make(fake).search_nearby(Bbox(170, 10, -170, 20), **OVERTURE)
         assert [h.name for h in result.places] == [winner]
 
     def test_keeps_two_records_that_have_neither_origin_nor_uri(self, make: Make) -> None:
@@ -107,14 +107,14 @@ class TestDeduplication:
         fake = FakeServer(
             tilesets=[overture([FakeTile(url("a"), [record(anonymous("One")), record(anonymous("Two"))])])]
         )
-        result = make(fake).search_places(self.region, dataset="overturemaps.org")
+        result = make(fake).search_nearby(self.region, dataset="overturemaps.org")
         assert sorted(str(h.name) for h in result.places) == ["One", "Two"]
         assert all(h.origin is None for h in result.places)
 
     def test_identifies_an_origin_less_record_by_its_uri(self, make: Make) -> None:
         value = place("x", "By uri", [point(37.775, -122.415)], {"origin": None})
         fake = FakeServer(tilesets=[overture([FakeTile(url("a"), [record(value, None, "https://example.org/r/1")])])])
-        result = make(fake).search_places(self.region, dataset="overturemaps.org")
+        result = make(fake).search_nearby(self.region, dataset="overturemaps.org")
         assert [h.origin for h in result.places] == ["https://example.org/r/1"]
 
 
@@ -134,14 +134,14 @@ class TestPipelineOrder:
                 )
             ]
         )
-        places = make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places
+        places = make(fake).search_nearby(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places
         assert [h.place["name"] for h in places] == ["Low"]
 
     def test_dedupes_before_the_region_filter_so_an_outside_winner_drops_the_place(self, make: Make) -> None:
         outside = record(place("x", "Outside", [point(10, 10)]))
         inside = record(place("x", "Inside", [point(37.775, -122.415)]))
         fake = FakeServer(tilesets=[overture([FakeTile(tile_url("a"), [outside]), FakeTile(tile_url("b"), [inside])])])
-        assert make(fake).search_places(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places == []
+        assert make(fake).search_nearby(Bbox(-122.42, 37.77, -122.41, 37.78), **OVERTURE).places == []
 
 
 class TestOrderingTies:
@@ -154,7 +154,7 @@ class TestOrderingTies:
         fake = FakeServer(
             tilesets=[overture([FakeTile(url("a"), [same("x", {"origin": None}), same("c"), same("a"), same("b")])])]
         )
-        result = make(fake).search_places(self.region, dataset="overturemaps.org")
+        result = make(fake).search_nearby(self.region, dataset="overturemaps.org")
         assert [h.origin for h in result.places] == [place_origin("a"), place_origin("b"), place_origin("c"), None]
 
 
@@ -269,7 +269,7 @@ class TestRegionFilteringCircle:
         box = place("clipping", "Clipping", [bbox_location(89, 80, 50, 40)])
         assert haversine(lat, 0, lat, 40) > radius
         fake = FakeServer(tilesets=[overture([FakeTile(url("t"), [record(box)])])])
-        places = make(fake).search_places(Circle(lat, 0, radius), **OVERTURE).places
+        places = make(fake).search_nearby(Circle(lat, 0, radius), **OVERTURE).places
         assert [id_of(h.origin) for h in places] == ["clipping"]
         assert places[0].distance <= radius
 
@@ -303,7 +303,7 @@ class TestDeterminism:
         FakeTile(
             url("a"),
             [
-                record(place("dup", "Copy A", [point(37.775, -122.415)]), 5),
+                record(place("dup", "Alpha Copy A", [point(37.775, -122.415)]), 5),
                 record(place("a1", "Alpha", [point(37.772, -122.412)]), 5),
                 record(place("a2", "Alpha", [point(37.772, -122.412)]), 5),
             ],
@@ -311,14 +311,14 @@ class TestDeterminism:
         FakeTile(
             url("b"),
             [
-                record(place("dup", "Copy B", [point(37.775, -122.415)]), 5),
+                record(place("dup", "Alpha Copy B", [point(37.775, -122.415)]), 5),
                 record(place("b1", "Alpha", [point(37.772, -122.412)]), 5),
             ],
         ),
         FakeTile(
             url("c"),
             [
-                record(place("dup", "Copy C", [point(37.775, -122.415)]), 5),
+                record(place("dup", "Alpha Copy C", [point(37.775, -122.415)]), 5),
                 record(place("c1", "Alpha", [point(37.772, -122.412)]), 5),
             ],
         ),
@@ -330,8 +330,8 @@ class TestDeterminism:
         outputs = []
         for order in itertools.permutations("abc"):
             fake = FakeServer(tilesets=[overture(self.tiles)], delays={url(n): i * 0.015 for i, n in enumerate(order)})
-            outputs.append(make(fake).search_places(self.region, text=text, **OVERTURE))
+            outputs.append(make(fake).search_nearby(self.region, text=text, **OVERTURE))
         assert all(o == outputs[0] for o in outputs)
         places = outputs[0].places
         assert sorted(id_of(h.origin) for h in places) == ["a1", "a2", "b1", "c1", "dup"]
-        assert next(h for h in places if id_of(h.origin) == "dup").name == "Copy A"
+        assert next(h for h in places if id_of(h.origin) == "dup").name == "Alpha Copy A"

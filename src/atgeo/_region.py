@@ -36,6 +36,16 @@ def validate_region(region: Region) -> None:
         raise TypeError(f"region must be a Circle or a Bbox, not {type(region).__name__}")
 
 
+def validate_keyword_region(region: object) -> None:
+    """A keyword search's region (contract §3): absent (None), or a Bbox that passes the bbox checks. A circle is
+    refused, since a circle API invites the device's own position as its centre."""
+    if region is None:
+        return
+    if not isinstance(region, Bbox):
+        raise TypeError(f"a keyword search region must be a Bbox, not {type(region).__name__}")
+    validate_region(region)
+
+
 def center(region: Region) -> tuple[float, float]:
     """(lat, lon) of the region's centre."""
     if isinstance(region, Circle):
@@ -72,7 +82,7 @@ def lon_segments_overlap(a: list[LonSegment], b: list[LonSegment]) -> bool:
     return any(alo <= bhi and blo <= ahi for alo, ahi in a for blo, bhi in b)
 
 
-def _circle_box(lat: float, lon: float, radius: float) -> tuple[float, float, float, float]:
+def circle_box(lat: float, lon: float, radius: float) -> tuple[float, float, float, float]:
     half = radius / DEG_TO_M
     min_lat = max(lat - half, -90.0)
     max_lat = min(lat + half, 90.0)
@@ -121,10 +131,39 @@ def query_bboxes(region: Region) -> list[str]:
     if isinstance(region, Bbox):
         min_lon, min_lat, max_lon, max_lat = region.west, region.south, region.east, region.north
     else:
-        min_lon, min_lat, max_lon, max_lat = _circle_box(region.lat, region.lon, region.radius)
+        min_lon, min_lat, max_lon, max_lat = circle_box(region.lat, region.lon, region.radius)
     lat0, lat1 = _snap_span(min_lat, max_lat, 90)
     out = []
     for lo, hi in lon_segments(min_lon, max_lon):
         lon0, lon1 = _snap_span(lo, hi, 180)
         out.append(",".join(_fixed(u) for u in (lon0, lat0, lon1, lat1)))
     return out
+
+
+def keyword_bbox(region: Bbox) -> str:
+    """The smallest whole-degree box the server accepts that covers the box, as the ``bbox`` string (contract §16):
+    plain integers joined by commas, west, south, east, north. Zero-width spans widen by one cell, and a crossing
+    box whose snapped edges no longer cross validly becomes the full band. ``region`` is validated."""
+
+    def span(lo: float, hi: float, limit: int) -> tuple[int, int]:
+        # math.floor and math.ceil of a float are ints: no ".0", and no "-0" (ceil(-0.5) is 0).
+        low, high = math.floor(lo), math.ceil(hi)
+        if low == high:
+            if high < limit:
+                high += 1
+            else:
+                low -= 1
+        return low, high
+
+    west, south, east, north = region.west, region.south, region.east, region.north
+    s, n = span(south, north, 90)
+    # A crossing box is decided on its input values first: a west of 180 or an east of -180 makes it a plain box.
+    if west == 180 and west > east:
+        west = -180
+    if east == -180 and west > east:
+        east = 180
+    if west > east:
+        w, e = math.floor(west), math.ceil(east)
+        return f"{w},{s},{e},{n}" if w > 0 and e < 0 else f"-180,{s},180,{n}"
+    w, e = span(west, east, 180)
+    return f"{w},{s},{e},{n}"

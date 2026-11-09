@@ -6,12 +6,12 @@ import copy
 from collections.abc import ItemsView, Iterator, KeysView, Mapping, ValuesView
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
 class Circle:
-    """A circle; ``radius`` in metres. Not validated here: ``search_places`` rejects a bad one."""
+    """A circle; ``radius`` in metres. Not validated here: ``search_nearby`` rejects a bad one."""
 
     lat: float
     lon: float
@@ -153,8 +153,8 @@ class _ReadOnlyMapping(Mapping[str, Any]):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SearchHit:
-    """One place a search found.
+class NearbyHit:
+    """One place a nearby search found, from the tiles.
 
     ``place`` is the record value exactly as served, as a read-only mapping over the very dict in the
     client's cache, not a copy. Assigning to or deleting one of its keys raises ``TypeError``, and
@@ -166,8 +166,11 @@ class SearchHit:
 
     ``collection`` is the collection ``origin`` names, found in the attribution of the tile the record came from
     (contract §8): a frozen pair, or None when nothing matches.
+
+    ``via`` is ``"tiles"``; a keyword hit's is ``"keyword"``, which tells the two apart in a fallback's places.
     """
 
+    via: Literal["tiles"]
     origin: str | None
     place: Mapping[str, Any]
     importance: int | None
@@ -183,6 +186,31 @@ class SearchHit:
     @property
     def location(self) -> PlaceLocation:
         """The location the client measured ``distance`` to (contract §5)."""
+        return _location(self.place)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class KeywordHit:
+    """One place a keyword search found, in the server's order.
+
+    It has no ``distance`` and no ``score``: the server ranks by neither, and the app can compute a distance
+    from ``location``. ``place`` is a read-only mapping, as on :class:`NearbyHit`, over a dict of this answer's
+    own. ``collection`` is found in the attribution of the answer's element for the place (contract §8, §16).
+    """
+
+    via: Literal["keyword"]
+    origin: str | None
+    place: Mapping[str, Any]
+    importance: int | None
+    collection: CollectionKey | None = None
+
+    @property
+    def name(self) -> str | None:
+        """``place["name"]`` when that is a string."""
+        return _name(self.place)
+
+    @property
+    def location(self) -> PlaceLocation:
         return _location(self.place)
 
 
@@ -213,26 +241,66 @@ class TileFailure:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SearchResult:
-    """A search's places. ``complete`` is False when any tile failed; ``tile_failures`` lists each, in tile URL
-    order, and ``tiles.failed`` is its length.
+class Disclosure:
+    """What the server learned during one call (contract §4.11).
+
+    ``keyword`` is True when the keyword was sent. ``region`` is the grid, in degrees, of the finest region sent
+    during the call: 0.01 for a nearby search that asked the server for tiles, 1.0 for a keyword search with a
+    region, None when none was sent. It is about the call: a search answered from the cache reports None
+    though an earlier call told the server about the area.
+    """
+
+    keyword: bool
+    region: float | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NearbySearchResult:
+    """A nearby search's places. ``complete`` is False when any tile failed; ``tile_failures`` lists each, in tile
+    URL order, and ``tiles.failed`` is its length.
 
     ``attribution`` credits every collection whose data the used tiles hold, whether or not any of a tile's
     records survived: one entry per (dataset, collection), the lowest tile URL's winning, sorted by dataset then
     collection. Always a tuple, empty when no tile was used. Entries are immutable, so there is nothing to copy.
     """
 
-    places: list[SearchHit]
+    places: list[NearbyHit]
     complete: bool
     overview: bool
     tiles: TileCounts
+    disclosed: Disclosure
+    tile_failures: tuple[TileFailure, ...] = ()
+    attribution: tuple[Attribution, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class KeywordSearchResult:
+    """A keyword search's places, in the server's order. ``attribution`` is the union of every place's, sorted as
+    a nearby search's is. Always a tuple."""
+
+    places: list[KeywordHit]
+    attribution: tuple[Attribution, ...]
+    disclosed: Disclosure
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FallbackSearchResult:
+    """The nearby result's fields, with ``places`` holding both kinds of hit; ``via`` tells them apart. Keyword
+    hits come first. ``disclosed.keyword`` says whether the keyword went out. ``complete``, ``overview``,
+    ``tiles`` and ``tile_failures`` are the nearby search's."""
+
+    places: list[NearbyHit | KeywordHit]
+    complete: bool
+    overview: bool
+    tiles: TileCounts
+    disclosed: Disclosure
     tile_failures: tuple[TileFailure, ...] = ()
     attribution: tuple[Attribution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PlaceRecord:
-    """One place by origin. ``place`` is a read-only mapping, as on :class:`SearchHit`."""
+    """One place by origin. ``place`` is a read-only mapping, as on :class:`NearbyHit`."""
 
     origin: str
     place: Mapping[str, Any]

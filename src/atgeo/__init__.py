@@ -1,10 +1,11 @@
-"""A client for the atgeo gazetteer, which searches places without telling the server what you searched for."""
+"""A client for the atgeo gazetteer, which searches nearby places without telling the server what you searched
+for, and says so in the method name when a search might."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._async import AsyncAtgeoClient
+from ._async import AsyncAtgeoClient, KeywordAutocomplete
 from ._sync import AtgeoClient
 from ._urllib3 import Urllib3Transport
 from .errors import AtgeoDecodingError, AtgeoError
@@ -19,13 +20,17 @@ from .types import (
     CollectionInfo,
     CollectionKey,
     CollectionRef,
+    Disclosure,
     Extent,
+    FallbackSearchResult,
+    KeywordHit,
+    KeywordSearchResult,
+    NearbyHit,
+    NearbySearchResult,
     PlaceLocation,
     PlaceRecord,
     Point,
     Region,
-    SearchHit,
-    SearchResult,
     ServedTileset,
     ServiceDescription,
     SortMode,
@@ -57,15 +62,20 @@ __all__ = [
     "CollectionInfo",
     "CollectionKey",
     "CollectionRef",
+    "Disclosure",
     "Extent",
+    "FallbackSearchResult",
     "HttpResponse",
+    "KeywordAutocomplete",
+    "KeywordHit",
+    "KeywordSearchResult",
+    "NearbyHit",
+    "NearbySearchResult",
     "PlaceLocation",
     "PlaceRecord",
     "Point",
     "RedirectError",
     "Region",
-    "SearchHit",
-    "SearchResult",
     "ServedTileset",
     "ServiceDescription",
     "SortMode",

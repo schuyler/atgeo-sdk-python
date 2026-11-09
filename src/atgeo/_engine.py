@@ -19,13 +19,13 @@ import threading
 import urllib.parse
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ._cache import ParsedTiles, TileCache, TileEntry, TtlCache
 from ._locations import dedupe, in_region, locate, record_key
-from ._rank import rank
-from ._region import query_bboxes, validate_region
-from ._text import normalize, utf16
+from ._rank import collection_of, rank
+from ._region import circle_box, keyword_bbox, query_bboxes, validate_keyword_region, validate_region
+from ._text import match_tier, normalize, qualifies, utf16
 from ._urls import is_http_url, prepare_url
 from ._wire import (
     TileList,
@@ -35,18 +35,26 @@ from ._wire import (
     error_from,
     parse_body,
     read_place,
+    read_search_places,
     read_service_description,
     read_tile_list,
     read_tile_payload,
     read_tileset,
     record_keys,
 )
+from .errors import AtgeoError
 from .transport import HttpResponse
 from .types import (
     Attribution,
+    Bbox,
+    Disclosure,
+    FallbackSearchResult,
+    KeywordHit,
+    KeywordSearchResult,
+    NearbyHit,
+    NearbySearchResult,
     PlaceRecord,
     Region,
-    SearchResult,
     ServiceDescription,
     SortMode,
     TileCounts,
@@ -99,6 +107,12 @@ class SearchPlan:
     dataset: str
     collection: str | None
     lists: list[TileListRequest]  # one per antimeridian half, in call order
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordPlan:
+    url: str
+    region: bool  # whether a region goes with the keyword
 
 
 def union_attribution(per_tile: Iterable[tuple[Attribution, ...]]) -> tuple[Attribution, ...]:
@@ -175,7 +189,19 @@ class Engine:
             raise error_from(response.status, response.body)
         return decode(response.body)
 
-    # searchPlaces.
+    # search_nearby.
+
+    @staticmethod
+    def check_dataset(dataset: object, method: str) -> None:
+        """A dataset that is not a string is a missing one (§4.1), and a missing one is a TypeError, which
+        Python raises itself for the absent argument. A str subclass is a string; "" is a dataset."""
+        if not isinstance(dataset, str):
+            raise TypeError(f"{method}() dataset must be a str, not {type(dataset).__name__}")
+
+    @staticmethod
+    def check_keyword(keyword: object, method: str) -> None:
+        if not isinstance(keyword, str):
+            raise TypeError(f"{method}() keyword must be a str, not {type(keyword).__name__}")
 
     def plan(
         self,
@@ -186,10 +212,7 @@ class Engine:
         sort: SortMode | str,
     ) -> SearchPlan:
         """Validate, in the contract's order (§3), before anything is looked up or fetched."""
-        # A dataset that is not a string is a missing one (§4.1), and a missing one is a TypeError, which
-        # Python raises itself for the absent argument. A str subclass is a string; "" is a dataset.
-        if not isinstance(dataset, str):
-            raise TypeError(f"search_places() dataset must be a str, not {type(dataset).__name__}")
+        self.check_dataset(dataset, "search_nearby")
         validate_region(region)
         try:
             mode = SortMode(sort)
@@ -205,6 +228,108 @@ class Engine:
             params = [("dataset", ds), *([] if coll is None else [("collection", coll)]), ("bbox", bbox)]
             lists.append(TileListRequest(f"{ds}|{coll or ''}|{bbox}", self.xrpc_url("org.atgeo.getTiles", params)))
         return SearchPlan(region, query, mode, ds, coll, lists)
+
+    # search_by_keyword, search_nearby_then_by_keyword, autocomplete_by_keyword.
+
+    def plan_keyword(
+        self, keyword: str, dataset: str, collection: str | None, region: Bbox | None, method: str = "search_by_keyword"
+    ) -> KeywordPlan:
+        """Validate, in the contract's order (§3): the dataset, the keyword, then the region. A keyword that cannot
+        qualify is not an error here: the server answers KeywordRequired (§16)."""
+        self.check_dataset(dataset, method)
+        self.check_keyword(keyword, method)
+        validate_keyword_region(region)
+        # dataset, collection only if given, q exactly as passed, bbox only if a region was given.
+        params = [("dataset", dataset), *([] if collection is None else [("collection", collection)]), ("q", keyword)]
+        if region is not None:
+            params.append(("bbox", keyword_bbox(region)))
+        return KeywordPlan(self.xrpc_url("org.atgeo.searchPlaces", params), region is not None)
+
+    @staticmethod
+    def keyword_result(plan: KeywordPlan, body: object) -> KeywordSearchResult:
+        """A searchPlaces answer as hits in the server's order: no dedupe, no region filter, no ranking (§16)."""
+        found = read_search_places(body).places
+        return KeywordSearchResult(
+            places=[
+                KeywordHit(
+                    via="keyword",
+                    origin=p.origin,
+                    place=_ReadOnlyMapping(p.value),
+                    importance=p.importance,
+                    collection=collection_of(p.value, p.attribution),
+                )
+                for p in found
+            ],
+            attribution=union_attribution(p.attribution for p in found),
+            disclosed=Disclosure(keyword=True, region=1.0 if plan.region else None),
+        )
+
+    def read_keyword(self, plan: KeywordPlan, response: HttpResponse) -> KeywordSearchResult:
+        return self.keyword_result(plan, self.body_of(response))
+
+    @staticmethod
+    def check_fallback(dataset: object, keyword: object, keyword_region: object) -> None:
+        """The fallback's arguments before the region's, in the order of §3: the dataset, the keyword, then
+        ``keyword_region``, which has no default."""
+        Engine.check_dataset(dataset, "search_nearby_then_by_keyword")
+        Engine.check_keyword(keyword, "search_nearby_then_by_keyword")
+        if not (isinstance(keyword_region, str) and keyword_region in {"none", "degree"}):
+            raise ValueError(f"keyword_region must be 'none' or 'degree', not {keyword_region!r}")
+
+    @staticmethod
+    def fallback_wants_keyword(keyword: str, nearby: NearbySearchResult) -> bool:
+        """Whether the fallback asks the server (§18, steps 3 and 4): no nearby hit is tier 1, and the keyword
+        can qualify."""
+        query = normalize(keyword)
+        if any(match_tier(query, hit.place) == 1 for hit in nearby.places):
+            return False
+        return qualifies(keyword)
+
+    @staticmethod
+    def keyword_region(region: Region, keyword_region: Literal["none", "degree"]) -> Bbox | None:
+        """The region the fallback's keyword request carries: the nearby region as a box, or none (§18, step 5)."""
+        if keyword_region == "none":
+            return None
+        return region if isinstance(region, Bbox) else Bbox(*circle_box(region.lat, region.lon, region.radius))
+
+    @staticmethod
+    def is_keyword_required(error: BaseException) -> bool:
+        """The server's refusal of a keyword the qualifying check let through (§18 step 8, §19 step 4)."""
+        return isinstance(error, AtgeoError) and error.code == "KeywordRequired"
+
+    @staticmethod
+    def fallback_result(
+        nearby: NearbySearchResult, found: KeywordSearchResult | None, disclosed: Disclosure | None = None
+    ) -> FallbackSearchResult:
+        """The nearby result with the keyword answer merged in (§18, step 6): the keyword hits in the server's order,
+        then the nearby hits, leaving out any whose origin a keyword hit has. A nearby hit with no origin is never
+        left out. Without an answer, the nearby result as it is. ``disclosed`` replaces the nearby's own."""
+        places: list[NearbyHit | KeywordHit] = list(nearby.places)
+        attribution = nearby.attribution
+        if found is not None:
+            origins = {hit.origin for hit in found.places}
+            places = [*found.places, *(h for h in nearby.places if h.origin is None or h.origin not in origins)]
+            attribution = union_attribution([nearby.attribution, found.attribution])  # the nearby entry wins a tie
+            if disclosed is None:
+                near = nearby.disclosed.region
+                disclosed = Disclosure(keyword=True, region=near if near is not None else found.disclosed.region)
+        return FallbackSearchResult(
+            places=places,
+            complete=nearby.complete,
+            overview=nearby.overview,
+            tiles=nearby.tiles,
+            disclosed=disclosed if disclosed is not None else nearby.disclosed,
+            tile_failures=nearby.tile_failures,
+            attribution=attribution,
+        )
+
+    @staticmethod
+    def refused_keyword(nearby: NearbySearchResult, keyword_region: Literal["none", "degree"]) -> FallbackSearchResult:
+        """The server refused the keyword (§18, step 8): the nearby result, but the keyword went out, with the
+        region as the finest sent."""
+        near = nearby.disclosed.region
+        region = near if near is not None else 1.0 if keyword_region == "degree" else None
+        return Engine.fallback_result(nearby, None, Disclosure(keyword=True, region=region))
 
     def cached_tile_list(self, key: str) -> TileList | None:
         with self._lock:
@@ -302,9 +427,10 @@ class Engine:
         return entry, payload
 
     def assemble(
-        self, plan: SearchPlan, urls: Sequence[str], outcomes: Sequence[Outcome], overview: bool
-    ) -> SearchResult:
-        """§4.5 to §4.9 over the tiles that loaded; ``outcomes[i]`` is what ``urls[i]`` came to."""
+        self, plan: SearchPlan, urls: Sequence[str], outcomes: Sequence[Outcome], overview: bool, sent: bool
+    ) -> NearbySearchResult:
+        """§4.5 to §4.9 over the tiles that loaded; ``outcomes[i]`` is what ``urls[i]`` came to. ``sent`` is whether
+        the call asked the server for a tile list or attempted a tile fetch (§4.11)."""
         used: dict[str, Tile] = {}
         failures: list[TileFailure] = []
         for url, outcome in zip(urls, outcomes, strict=True):
@@ -323,7 +449,7 @@ class Engine:
             prefix = f"urn:atgeo:{plan.dataset}:{plan.collection}:"
             sourced = [s for s in sourced if type(o := s.value.get("origin")) is str and o.startswith(prefix)]
         sourced = [s for s in sourced if in_region(locate(s.value), plan.region)]
-        return SearchResult(
+        return NearbySearchResult(
             places=rank(
                 [s.record for s in sourced],
                 plan.region,
@@ -337,6 +463,7 @@ class Engine:
             tiles=TileCounts(fetched=len(used), failed=len(failures)),
             tile_failures=tuple(failures),
             attribution=union_attribution(used[url][1].attribution or () for url in urls if url in used),
+            disclosed=Disclosure(keyword=False, region=0.01 if sent else None),
         )
 
     # getPlace, describeService, describeTileset.
@@ -389,7 +516,7 @@ class Engine:
         return read_tileset(self.body_of(response))
 
 
-def returned(result: SearchResult) -> SearchResult:
+def returned(result: NearbySearchResult) -> NearbySearchResult:
     """A search's result, its failed tiles logged. The drivers call it as the search returns, never sooner:
     a search that fails or is cancelled reports no failed tiles (contract §4.4)."""
     # The entry's fields and nothing else, never the text or the region (§12), and never above DEBUG (§14).

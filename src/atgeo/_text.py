@@ -6,7 +6,10 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+# Contract §7: a word match (tier 1) is kept whatever its score; a fuzzy-only match (tier 2) needs FUZZY_THRESHOLD.
+# A query whose words all fold away has no tokens to match, so it keeps JW_THRESHOLD.
 JW_THRESHOLD = 0.6
+FUZZY_THRESHOLD = 0.8
 MAX_QUERY_TOKENS = 12
 
 # JavaScript's \s, exactly. None of Python's predicates (str.isspace, str.split(), str.strip, re's \s)
@@ -118,24 +121,64 @@ def text_score(query: str, value: Mapping[str, Any]) -> float:
 _APOSTROPHES = str.maketrans("", "", "'\u2019\u02bc")
 
 
-def _fold(word: str) -> list[bytes]:
-    """The words of a normalized name or query word for tier matching (contract §7), as UTF-16 sort keys:
-    apostrophes vanish, and each run of punctuation (general category P*) separates words. Symbols do not."""
+def _fold_words(word: str) -> list[str]:
+    """The words of a normalized name or query word for tier matching (contract §7): apostrophes vanish, and
+    each run of punctuation (general category P*) separates words. Symbols do not."""
     spaced = "".join(" " if unicodedata.category(c)[0] == "P" else c for c in word.translate(_APOSTROPHES))
-    return [utf16(t) for t in spaced.split(" ") if t]
+    return [t for t in spaced.split(" ") if t]
+
+
+def _fold(word: str) -> list[bytes]:
+    """_fold_words as UTF-16 sort keys, which compare and prefix by code unit."""
+    return [utf16(t) for t in _fold_words(word)]
+
+
+def query_tokens(query: str) -> list[bytes]:
+    """The tokens match tier compares: each of the first 12 words of the normalized query, folded, as UTF-16 keys.
+    Empty for a query whose words all fold away (``&``)."""
+    return [t for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
+
+
+def tier_of(tokens: Sequence[bytes], value: Mapping[str, Any]) -> int:
+    """match_tier for tokens from query_tokens, so that a caller ranking many records folds the query once."""
+    if not tokens:
+        return 1
+    for name in _names(value):
+        name_words = _fold(name)
+        if all(any(n.startswith(q) for n in name_words) for q in tokens):
+            return 1
+    return 2
 
 
 def match_tier(query: str, value: Mapping[str, Any]) -> int:
     """1 if every query word begins a word of one single name, else 2 (contract §7); 1 for a query that folds to
-    no words. ``query`` is already normalized and non-empty; call it for a record that scored at least 0.6.
+    no words. ``query`` is already normalized.
 
     The prefix test is on UTF-16 code units, as the contract asks, so a query ending in a lone high surrogate
     prefixes a name holding the whole pair, where ``str.startswith`` would say no."""
-    words = [t for w in query.split(" ")[:MAX_QUERY_TOKENS] for t in _fold(w)]
-    if not words:
-        return 1
-    for name in _names(value):
-        name_words = _fold(name)
-        if all(any(n.startswith(q) for n in name_words) for q in words):
-            return 1
-    return 2
+    return tier_of(query_tokens(query), value)
+
+
+def _code_points(s: str) -> str:
+    """The string as code points: a high surrogate followed by a low one, which a JavaScript string would read
+    as one character, becomes that character. Lone surrogates stay."""
+    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
+def _without_spacing_marks(word: str) -> str:
+    """The word without spacing (Mc) and enclosing (Me) marks, recomposed (contract §17, step 3)."""
+    kept = "".join(c for c in word if unicodedata.category(c) not in ("Mc", "Me"))
+    return unicodedata.normalize("NFC", kept)
+
+
+def qualifies(keyword: str) -> bool:
+    """Whether the server's keyword search would accept the keyword (contract §17): after folding, dropping
+    spacing and enclosing marks, recomposing and deduplicating, one of its first 12 words has two code points.
+    Not match_tier's tokenization, and not for reuse as it."""
+    words = (
+        _without_spacing_marks(t)
+        for w in normalize(_code_points(keyword)).split(" ")  # normalize leaves "" for an empty keyword
+        for t in _fold_words(w)
+    )
+    distinct = list(dict.fromkeys(w for w in words if w))[:MAX_QUERY_TOKENS]
+    return any(len(w) >= 2 for w in distinct)  # len counts code points: _code_points paired the surrogates

@@ -1,6 +1,6 @@
 # atgeo for Python
 
-A Python client for the atgeo gazetteer served by [garganorn](https://github.com/schuyler/garganorn), which searches places without telling the server what you searched for.
+A Python client for the atgeo gazetteer served by [garganorn](https://github.com/schuyler/garganorn), which searches nearby places without telling the server what you searched for, and says so in the method name when a search might.
 
 It's a port of [@atgeo/client](https://github.com/schuyler/atgeo-sdk-js) and returns the same places in the same order for the same server answers. There's a blocking client for scripts, notebooks and WSGI apps, and an asyncio client for async servers, with the same methods and results. It needs Python 3.11 or later, and installs urllib3 and truststore; the async client needs aiohttp as well.
 
@@ -10,7 +10,7 @@ It's a port of [@atgeo/client](https://github.com/schuyler/atgeo-sdk-js) and ret
 from atgeo import AtgeoClient, Circle
 
 with AtgeoClient() as atgeo:
-    result = atgeo.search_places(
+    result = atgeo.search_nearby(
         Circle(lat=39.9526, lon=-75.1652, radius=1000),  # metres
         dataset="overturemaps.org",
         collection="place",
@@ -24,7 +24,9 @@ with AtgeoClient() as atgeo:
         print(credit.dataset, credit.collection, credit.licenses)
 ```
 
-Misspellings are fine; matching is fuzzy (words that match exactly rank first), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org covers the whole world. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places.
+Misspellings are fine; matching is fuzzy (words that match exactly rank first, and a word match is never dropped), and that finds the Starbucks around Philadelphia's City Hall. The public server at places.atgeo.org covers the whole world. `dataset` is required; there's no default, so a search always says whose places it wants. If `result.complete` is `False`, some tiles failed to load and the results are partial; `result.tile_failures` says which, and why. If `result.overview` is `True`, the region was too big to search in full and you got only its most important places. `result.disclosed` says what the server learned from the call (see [Privacy](#privacy)).
+
+Methods with `keyword` in their name may send your search text to the server; no other method does. `search_nearby` never does.
 
 The async version is the same with `await`:
 
@@ -35,7 +37,7 @@ from atgeo import AsyncAtgeoClient, Circle
 
 async def main() -> None:
     async with AsyncAtgeoClient() as atgeo:
-        result = await atgeo.search_places(
+        result = await atgeo.search_nearby(
             Circle(39.9526, -75.1652, 1000), dataset="overturemaps.org", collection="place", text="Starbux"
         )
         print(len(result.places))
@@ -93,27 +95,30 @@ If your app already has a configured `requests.Session` or uses httpx, copy [`ex
 
 The methods are the same on both clients; on `AsyncAtgeoClient` they're coroutines.
 
-### `search_places(region, *, dataset, text=None, collection=None, sort="fused") -> SearchResult`
+### `search_nearby(region, *, dataset, text=None, collection=None, sort="fused") -> NearbySearchResult`
+
+Searches the tiles around a region on the device. Your text, and your precise location, stay local.
 
 | Argument | Meaning |
 |---|---|
 | `region` | Required. `Circle(lat, lon, radius)` with the radius in metres, or `Bbox(west, south, east, north)` in degrees. A circle is latitude first and a box longitude first (GeoJSON's order), so name the arguments. A bbox with `west > east` crosses the antimeridian. |
 | `dataset` | Required, such as `overturemaps.org`. There is no default. |
-| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. Places scoring below 0.6 are dropped. |
+| `text` | Optional search text, matched fuzzily against each place's `name` and its `variants[].name` after lowercasing and stripping accents and extra whitespace. A place with a word match is kept at any score; one that matches only fuzzily needs a score of 0.8. |
 | `collection` | Optional, such as `way`. Without it you search every collection of the dataset together. |
 | `sort` | `SortMode.FUSED` (default), `DISTANCE` or `SIMILARITY`, or the same as strings. |
 
-Everything after `region` is keyword-only, so `search_places(region, "Starbux")` is an error rather than a guess.
+Everything after `region` is keyword-only, so `search_nearby(region, "Starbux")` is an error rather than a guess.
 
 A missing `dataset`, or one that isn't a `str` (`None`, a number, bytes), is a `TypeError` raised before any request and before the region is looked at; a `collection` without a `dataset` is the same error. An empty string is a dataset, and goes to the server as given. On the async client a missing argument fails at the call and a wrong-typed one when you `await` it.
 
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SearchResult:
-    places: list[SearchHit]
+class NearbySearchResult:
+    places: list[NearbyHit]
     complete: bool  # False if any tile failed to load
     overview: bool  # True if the server answered with its coarse overview
     tiles: TileCounts  # fetched and failed
+    disclosed: Disclosure  # what the server learned from this call
     tile_failures: tuple[TileFailure, ...]  # each failed tile, in tile URL order; () when complete
     attribution: tuple[Attribution, ...]  # who to credit for the tiles used, one entry per collection; () if none
 
@@ -143,7 +148,8 @@ class TileFailure:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SearchHit:
+class NearbyHit:
+    via: Literal["tiles"]  # where the hit came from; a keyword hit's is "keyword"
     origin: str | None  # place["origin"], else the tile record's uri, else None
     place: Mapping[str, Any]  # the record value, exactly as served; a read-only view of the cached dict
     importance: int | None  # relative to its tileset; None if it has none
@@ -154,6 +160,8 @@ class SearchHit:
     name: str | None  # property: place["name"] if it's a string
     location: PlaceLocation  # property: point and/or box, parsed as the client parsed them for distance
 ```
+
+`result.disclosed` is `Disclosure(keyword=False, region=0.01)` for a search that asked the server for tiles, and `region=None` for one answered entirely from the cache: the field is about the call, so a warm search reports nothing though an earlier one told the server about the area.
 
 `result.attribution` covers every tile the search used, including tiles whose records were all filtered out, and the reference collections a tileset lists for places that mention them (a hit's containing division, say), so show it wherever you show the places. It has one entry per `(dataset, collection)`, taken from the lowest tile URL when tiles disagree, sorted by dataset and then collection, and it's empty when no tile was used. A failed tile adds nothing. Entries are frozen and `licenses` is a tuple, so there's nothing to copy and nothing you can change in the cache. `hit.collection` is the first entry, in the tile's served order, whose `urn:atgeo:{dataset}:{collection}:` prefix starts the hit's `origin`, as a new `CollectionKey` with just those two fields. It's `None` when nothing matches, when the tile has no attribution, or when the hit is keyed by its `uri` instead of an `origin`.
 
@@ -174,13 +182,81 @@ What it shares with a dict: `==` in both directions (`hit.place == some_dict` an
 
 `name` and `location` save you the two reads every app needs: `location.point` is the first usable `geo` entry of `place["locations"]`, `location.bbox` the first usable `bbox` entry (`west > east` crosses the antimeridian), coordinates already parsed from the strings they arrive as.
 
-With text, places scoring below 0.6 are dropped, and the rest rank in two tiers whatever the sort: a place with a name (its own or a variant) that has every word of the query as the start of one of its words comes before one that matches only fuzzily. Apostrophes are ignored and other punctuation splits words, so `mcdonalds` finds `McDonald's` and `st louis` finds `St. Louis`. On an overview answer, only that first tier is kept: the coarse set can't hold the place you misspelled.
+With text, results rank in two tiers whatever the sort: a place with a name (its own or a variant) that has every word of the query as the start of one of its words (tier 1) comes before one that matches only fuzzily (tier 2). A tier-1 place is kept whatever its score, since a word match is what you typed the start of, however short (`qu` finds `Bar & Grill at the Old Quarry` though it scores 0.41); a tier-2 place is kept only if it scores at least 0.8, so that a random string doesn't find real names. A query whose words all fold away (`&`) has no words to match and keeps places scoring at least 0.6. Apostrophes are ignored and other punctuation splits words, so `mcdonalds` finds `McDonald's` and `st louis` finds `St. Louis`. On an overview answer, only that first tier is kept: the coarse set can't hold the place you misspelled.
 
 Within a tier, `FUSED` orders by similarity, breaking near-ties by importance, then distance. `DISTANCE` orders nearest first, then the smaller place, then importance, then similarity. `SIMILARITY` orders by similarity, then distance, and needs `text`. Scores are compared to three decimals and remaining ties break on `origin`, so the order is deterministic.
 
 The [JavaScript README](https://github.com/schuyler/atgeo-sdk-js#readme) has the long version: overview answers, places that appear in several tiles, and how ties are broken. All of it applies here unchanged.
 
 The result types are frozen, keyword-only dataclasses. You can construct them for your own tests, and fields added later won't break code that does.
+
+### `search_by_keyword(keyword, *, dataset, collection=None, region=None) -> KeywordSearchResult`
+
+Asks the server for places whose names match the keyword. **This sends the keyword to the server**, and nothing about the nearby methods' privacy applies to it. The server matches each word of the keyword as the start of a word of a place's name, ignoring case and accents, and returns at most twenty places, most notable first. It takes no point and ranks by no distance.
+
+`region` is a `Bbox` or `None`; a `Circle` is a `TypeError`, since a circle invites passing the device's own position as its centre. The box is sent snapped outward to whole degrees, so the server learns a cell about 111 km across rather than a coordinate. The request is one GET, `searchPlaces`, with `dataset`, `collection` if you gave one, `q` (the keyword exactly as passed, untrimmed) and `bbox` if you gave a region, and nothing else. Nothing is cached.
+
+```python
+@dataclass(frozen=True, slots=True, kw_only=True)
+class KeywordSearchResult:
+    places: list[KeywordHit]  # in the server's order: no re-ranking, no region filter, no deduplication
+    attribution: tuple[Attribution, ...]  # the union of the places' attribution, as for a nearby search
+    disclosed: Disclosure  # Disclosure(keyword=True, region=1.0), or region=None without a region
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class KeywordHit:
+    via: Literal["keyword"]
+    origin: str | None
+    place: Mapping[str, Any]  # read-only, as on NearbyHit
+    importance: int | None
+    collection: CollectionKey | None
+    # name and location, as on NearbyHit; no distance and no score. Compute a distance from location if you want one.
+```
+
+A keyword that can't match (no word of two or more characters once case, accents and punctuation are gone) is not an error here; the server refuses it and you get `AtgeoError` with code `KeywordRequired`. One over 256 bytes of UTF-8 is `InvalidRequest`. `TypeError` is for a missing or non-string `dataset` or `keyword` and for a region that isn't a `Bbox`, and `ValueError` for a bbox that fails the usual checks; all of them come before any request, `dataset` first.
+
+### `search_nearby_then_by_keyword(region, *, dataset, keyword, keyword_region, collection=None, sort="fused") -> FallbackSearchResult`
+
+Runs `search_nearby` with the keyword as its text, and sends the keyword to the server only if that finds no place whose name has every word of it as a word start (no tier-1 hit) and the keyword can match. When the tiles hold a solid match, the keyword never leaves the device; when they don't and the keyword can match, it goes to the server.
+
+`keyword_region` is required, with no default, because whether a region goes with the keyword is your decision every time: `"none"` sends the keyword alone, `"degree"` sends it with the region as a whole-degree box, as `search_by_keyword` does (a circle goes as its enclosing box). The result is the nearby result with the keyword hits first, in the server's order, followed by the nearby hits whose `origin` no keyword hit has (a hit with no `origin` is never dropped); `hit.via` tells the two apart. `attribution` is both halves' union, and `disclosed` says what went out: `disclosed.region` is `0.01` whenever the nearby half asked the server for tiles, so a cold `"degree"` fallback reports `0.01` though the keyword travelled with a one-degree box.
+
+If the server refuses a keyword the client thought could match (a compatibility character such as `ﬁ` counts as two characters to the client and one to the server), that's no answer, not a failure: you get the nearby result with `disclosed.keyword` true. Any other failure of the keyword request raises, and the nearby results go with it, as a failed `getTiles` loses them. **When the keyword request fails the keyword may already have reached the server**, and the error carries no `disclosed`; treat a failure after the nearby half as one that may have sent it.
+
+The arguments are checked in this order, before any request: `dataset`, `keyword`, `keyword_region` (`"none"` or `"degree"`, else `ValueError`), the region, then `sort`.
+
+### `autocomplete_by_keyword(*, dataset, collection=None, region=None) -> KeywordAutocomplete` (async client only)
+
+For a text field that searches as the user types. It returns an object with one method, `await autocompleter.search_by_keyword(keyword)`. Make one per field: each holds only its own previous call, so two fields sharing a client don't supersede each other. The blocking client has none: it can't cancel a call in flight, and autocomplete is a UI behaviour.
+
+Every keyword that can match goes to the server as typed, prefixes included: typing `starbux` sends `st`, `sta`, `star` and so on, one request each (a one-character prefix, or any keyword with no word of two characters, makes no request and returns an empty result that disclosed nothing). The server keeps no log of these requests, as garganorn's privacy design has it, and an operator who chose to could record what it receives. Debouncing reduces how many prefixes go out; whether to debounce is your choice, and this client neither does nor offers to.
+
+Each call supersedes the previous one on the same autocompleter, which ends with `asyncio.CancelledError`, although the task that awaited it was not cancelled. **Catch that and ignore the answer**: it means "superseded". To tell it from a real cancellation, look at `asyncio.current_task().cancelling()`: it is 0 for a superseded call, and you must not swallow a `CancelledError` that arrives while it is above 0. Cancelling your own call cancels its request too.
+
+```python
+typing = atgeo.autocomplete_by_keyword(dataset="overturemaps.org", collection="place")
+
+
+async def on_keystroke(text: str) -> None:
+    try:
+        result = await typing.search_by_keyword(text)
+    except asyncio.CancelledError:
+        if asyncio.current_task().cancelling():  # we were cancelled; let it through
+            raise
+        return  # superseded by a later keystroke
+    show(result.places)
+```
+
+If the server refuses a keyword the client thought could match (`KeywordRequired`), the call returns an empty result with `disclosed=Disclosure(keyword=True, region=...)`, `region` being `1.0` if the autocompleter has a region and `None` if not. Any other failure raises.
+
+### The privacy of the keyword methods
+
+The nearby search sends the server a 0.01° cell and tile URLs. The keyword methods trade that for matching on the server: they send the keyword, and, if you pass one, a one-degree box. That finds places the tiles around you don't hold (a town you're not in), at the cost of the server seeing what you typed. Both are reasonable; they are different promises, which is why the names differ, and why every result says what it sent in `disclosed`.
+
+### `disclosed`
+
+`Disclosure(keyword: bool, region: float | None)` on every search result: `keyword` is true when a `searchPlaces` request went out, and `region` is the grid, in degrees, of the finest region sent during the call: `0.01` (tiles), `1.0` (a keyword box), or `None`. A call that raises returns nothing and so reports nothing.
 
 ### `get_place(origin) -> PlaceRecord`
 
@@ -197,20 +273,20 @@ A tileset's collections, attribution and extent, and its `overview` (`TilesetOve
 ### Errors
 
 - `AtgeoError` has the server's error `code` (`PlaceNotFound`, `BboxTooLarge`, `DatasetNotFound` and so on), or `HttpError` when the server didn't send one, a `message`, and the HTTP `status`. Use `status` to tell a request the server refused (4xx) from one it failed to answer (5xx); codes are an open list and new ones may appear.
-- `search_places` raises `TypeError` for a missing or non-string `dataset`, checked first, and then for a region that isn't a `Circle` or a `Bbox`; and `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text. All of them come before any request.
+- `search_nearby` raises `TypeError` for a missing or non-string `dataset`, checked first, and then for a region that isn't a `Circle` or a `Bbox`; and `ValueError` for an invalid region, an unknown `sort` or `SIMILARITY` without text. All of them come before any request. The keyword methods' arguments are described with them above.
 - A failed `getTiles` fails the search. A failed tile does not: it's skipped, listed in `tile_failures` and counted in `tiles.failed`, and `complete` is `False`. A tile's `kind` says where it went wrong: `REFUSED` is a tile URL that isn't absolute `http` or `https` or has credentials in it, and no request was made; `STATUS` a non-2xx, with its `status` and the `AtgeoError`; `DECODE` a 2xx whose body isn't a tile, with whatever the parser raised; `TRANSPORT` anything the transport raised, a timeout, a dropped connection, a body over the cap, or a bug in a transport of your own, which is why that one is a failed tile and not an exception. The kind, URL and status are the same in every atgeo SDK; `error` is Python's own, so two results compare equal without it.
 - An error in the client's own work after a tile has decoded, such as storing it in the cache, fails the search rather than passing for a bad tile. So does `MemoryError`, wherever it comes from.
 - Each failed tile is also logged on the `atgeo` logger at `DEBUG`, with its URL, kind, status and error and nothing else, never your search text or region. The tile URL does say roughly where you searched, about as precisely as the server already knows, so treat debug logs that way. The library adds no handler, as libraries shouldn't, so you see nothing until you ask: `logging.getLogger("atgeo").setLevel(logging.DEBUG)` with a handler configured, or `logging.basicConfig(level=logging.DEBUG)`. It never logs above `DEBUG`, so a search on every keystroke over a bad connection won't fill your logs, and it sends nothing anywhere.
 - A 2xx body that isn't JSON, or has nothing usable in it, raises `AtgeoDecodingError`, with the parser's error as its `__cause__`. It isn't a `ValueError`, so an `except ValueError` meant for a bad region won't swallow it. Retrying rarely helps; the server sends the same body again.
 - When no answer arrives at all, you get whatever the transport raised. Catch `(urllib3.exceptions.HTTPError, OSError)` with `Urllib3Transport` and `(aiohttp.ClientError, OSError)` with `AiohttpTransport`. Before a response, that's the library's own exception, or `TimeoutError` when `total_timeout` runs out (urllib3's `MaxRetryError`, with the real cause in `.reason`, isn't an `OSError`); after one starts, a body that doesn't arrive whole is `atgeo.BodyError`, and a bad or endless redirect is `atgeo.RedirectError`, both `OSError`s. With the httpx adapter, add `httpx.HTTPError`.
 - `AsyncAtgeoClient` with its default transport raises `RuntimeError` when called from an event loop other than its first call's, before making any request.
-- Cancelling the task running an async call raises `asyncio.CancelledError`. A blocking search can be interrupted with Ctrl-C: it stops claiming tiles at once and raises `KeyboardInterrupt`, though the requests already in flight run on, on daemon threads, until they finish or time out.
+- Cancelling the task running an async call raises `asyncio.CancelledError`, and so does an autocompleter call that a later call superseded. A request whose task is already cancelled is never handed to the transport, so a transport of your own that ignores cancellation doesn't send it. A blocking search can be interrupted with Ctrl-C: it stops claiming tiles at once and raises `KeyboardInterrupt`, though the requests already in flight run on, on daemon threads, until they finish or time out.
 
 ## Privacy
 
-Your search text never leaves the device. Neither does your precise location.
+With `search_nearby`, your search text never leaves the device, and neither does your precise location. The methods whose names contain `keyword` are the exception, and say so in the name: they send the keyword (see above), and every result's `disclosed` says what the call sent.
 
-A search asks the server which tiles cover a bounding box snapped outward to a 0.01° grid (roughly 1 km), downloads those tiles, and does the matching, filtering and ranking locally. The server learns the cell, the dataset and collection, and which tiles you fetched that weren't already cached. It also sees your IP address and the transport's own headers. The default transports send `User-Agent: atgeo-client-python` instead of one naming the urllib3, aiohttp and Python versions, and no `Accept-Language`. A transport of your own sends whatever its HTTP stack does. The [JavaScript README](https://github.com/schuyler/atgeo-sdk-js#privacy) lists exactly what goes on the wire; it's the same here, and the test suite checks it against a request-capturing fake server.
+A nearby search asks the server which tiles cover a bounding box snapped outward to a 0.01° grid (roughly 1 km), downloads those tiles, and does the matching, filtering and ranking locally. The server learns the cell, the dataset and collection, and which tiles you fetched that weren't already cached. It also sees your IP address and the transport's own headers. The default transports send `User-Agent: atgeo-client-python` instead of one naming the urllib3, aiohttp and Python versions, and no `Accept-Language`. A transport of your own sends whatever its HTTP stack does. A keyword search sends one `searchPlaces` request (`dataset`, `collection` if given, the keyword, and a whole-degree `bbox` if you gave a region) and no precise coordinate in any form. The [JavaScript README](https://github.com/schuyler/atgeo-sdk-js#privacy) lists exactly what goes on the wire; it's the same here, and the test suite checks it against a request-capturing fake server.
 
 ## Caching
 
@@ -238,7 +314,7 @@ uv run mypy
 ATGEO_SERVER=http://localhost:8000 uv run python scripts/e2e.py
 ```
 
-The end-to-end script runs both clients, and needs a server that answers `getPlace` with `value` and `attribution` ([schuyler/garganorn#27](https://github.com/schuyler/garganorn/issues/27)); against an older garganorn it fails at `get_place`, which is the point. It takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one.
+The end-to-end script runs both clients (the keyword calls, and the autocompleter on the async one), and needs a server that answers `getPlace` with `value` and `attribution` ([schuyler/garganorn#27](https://github.com/schuyler/garganorn/issues/27)); against an older garganorn it fails at `get_place`, which is the point. It takes the same `ATGEO_SERVER`, `ATGEO_DATASET`, `ATGEO_COLLECTION` and `ATGEO_REGION` variables as the JavaScript one.
 
 `tests/fixtures/` holds the shared fixtures, copied from atgeo-sdk-js at the commit named in `SOURCE`, and the garganorn lexicons, with their own `SOURCE`.
 

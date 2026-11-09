@@ -16,6 +16,7 @@ from .helpers import bbox_location, fixture, place, place_origin, point, record,
 
 SCENARIOS: list[dict[str, Any]] = fixture("ranking-scenarios.json")
 TIERS: list[dict[str, Any]] = fixture("match-tiers.json")
+LONE_SURROGATES: list[dict[str, Any]] = fixture("match-tiers-lone-surrogates.json")
 
 REGION = Bbox(-1, -1, 1, 1)
 
@@ -38,10 +39,33 @@ class TestRound3:
 
 
 class TestScoring:
-    def test_keeps_a_score_of_exactly_the_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_keeps_a_fuzzy_match_at_exactly_0_8_and_drops_one_below(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The query "q" is a prefix of neither name: tier 2, which needs 0.8 (contract §7).
+        records = [TileRecord(place(i, i, [point(0, 0)])) for i in ("keep", "drop", "weak")]
+        scores = {"keep": 0.8, "drop": 0.7999999, "weak": 0.6}
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: scores[v["name"]])
+        assert [h.name for h in rank(records, REGION, "q", SortMode.FUSED)] == ["keep"]
+
+    def test_keeps_a_word_match_at_any_score(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        records = [TileRecord(place(i, i, [point(0, 0)])) for i in ("qa", "qb", "zz")]
+        scores = {"qa": 0.41, "qb": 0.0, "zz": 0.79}
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: scores[v["name"]])
+        assert sorted(h.name or "" for h in rank(records, REGION, "q", SortMode.FUSED)) == ["qa", "qb"]
+
+    def test_keeps_the_old_threshold_for_a_query_whose_words_all_fold_away(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         records = [TileRecord(place(i, i, [point(0, 0)])) for i in ("keep", "drop")]
         monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.6 if v["name"] == "keep" else 0.5999999)
-        assert [h.name for h in rank(records, REGION, "q", SortMode.FUSED)] == ["keep"]
+        assert [h.name for h in rank(records, REGION, "&", SortMode.FUSED)] == ["keep"]
+
+    def test_scores_real_names_by_tier(self) -> None:
+        # `in n out` against `In-N-Out Burger` scores about 0.70 but is a word match; `xqzjvkwpfhgy` scores 0.64
+        # against `Qwizify` and is not kept.
+        burger = TileRecord(place("burger", "In-N-Out Burger", [point(0, 0)]))
+        qwizify = TileRecord(place("qwizify", "Qwizify", [point(0, 0)]))
+        assert [h.name for h in rank([burger], REGION, "in n out", SortMode.FUSED)] == ["In-N-Out Burger"]
+        assert rank([qwizify], REGION, "xqzjvkwpfhgy", SortMode.FUSED) == []
 
     def test_scores_only_the_first_twelve_query_words_one_at_a_time(self) -> None:
         words = [f"w{i}" for i in range(12)]
@@ -64,11 +88,11 @@ class TestScoring:
 class TestSortKeys:
     def test_orders_distance_sort_by_importance_before_score(self, monkeypatch: pytest.MonkeyPatch) -> None:
         records = [
-            TileRecord(place("a", "a", [point(0, 0)]), importance=1),
-            TileRecord(place("b", "b", [point(0, 0)]), importance=9),
+            TileRecord(place("a", "qa", [point(0, 0)]), importance=1),
+            TileRecord(place("b", "qb", [point(0, 0)]), importance=9),
         ]
-        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.9 if v["name"] == "a" else 0.7)
-        assert [h.name for h in rank(records, REGION, "q", SortMode.DISTANCE)] == ["b", "a"]
+        monkeypatch.setattr("atgeo._rank.text_score", lambda _q, v: 0.9 if v["name"] == "qa" else 0.7)
+        assert [h.name for h in rank(records, REGION, "q", SortMode.DISTANCE)] == ["qb", "qa"]
 
     def test_gives_a_place_with_a_point_no_size_even_when_it_has_a_box_too(self) -> None:
         # Both contain the centre (distance 0); the point-and-huge-box place is a point, so it is smaller.
@@ -125,6 +149,14 @@ class TestMatchTiers:
         # `place` is `{ name, variants? }`, with `variants` a list of `{ name }`: a place value as served.
         assert match_tier(normalize(c["query"]), c["place"]) == c["tier"]
 
+    def test_has_every_lone_surrogate_case(self) -> None:
+        assert len(LONE_SURROGATES) == 4
+
+    @pytest.mark.parametrize("c", LONE_SURROGATES, ids=[c["name"] for c in LONE_SURROGATES])
+    def test_lone_surrogate_case(self, c: dict[str, Any]) -> None:
+        # Python strings hold lone surrogates, so this port runs the fixture (contract §7).
+        assert match_tier(normalize(c["query"]), c["place"]) == c["tier"]
+
     def test_prefixes_by_utf16_code_units(self) -> None:
         # A query ending in a lone high surrogate prefixes the pair it starts; str.startswith says no.
         assert match_tier("a\ud83d", {"name": "a\U0001f600"}) == 1
@@ -169,7 +201,7 @@ class TestRankingScenarios:
         kwargs: dict[str, Any] = {"dataset": s["dataset"], "collection": s["collection"], "text": s.get("text")}
         if "sort" in s:
             kwargs["sort"] = s["sort"]
-        places = make(fake).search_places(region_of(s["region"]), **kwargs).places
+        places = make(fake).search_nearby(region_of(s["region"]), **kwargs).places
         origins = [p.origin for p in places]
         for top in s["expect"]["top"]:
             for origin in top["origins"]:

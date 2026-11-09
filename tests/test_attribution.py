@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from atgeo import Attribution, CollectionKey, SearchResult
+from atgeo import Attribution, CollectionKey, NearbySearchResult
 from atgeo.transport import HttpResponse, prepare_url
 
 from .conftest import Make
@@ -49,14 +49,14 @@ class Raw:
         return HttpResponse(tile.get("status", 200), json.dumps(UPSTREAM_ERROR if body is None else body).encode())
 
 
-def search(make: Make, s: dict[str, Any], server: Raw) -> SearchResult:
+def search(make: Make, s: dict[str, Any], server: Raw) -> NearbySearchResult:
     kwargs: dict[str, Any] = {"dataset": s["dataset"]}
     if "collection" in s:
         kwargs["collection"] = s["collection"]
-    return make(server.fake).search_places(region_of(s["region"]), **kwargs)
+    return make(server.fake).search_nearby(region_of(s["region"]), **kwargs)
 
 
-def check(result: SearchResult, s: dict[str, Any]) -> None:
+def check(result: NearbySearchResult, s: dict[str, Any]) -> None:
     # Deep equality, in order: a field the scenario leaves out is None in the entry, and an entry is the
     # Attribution of §1, with a tuple of licenses.
     assert isinstance(result.attribution, tuple)
@@ -159,7 +159,7 @@ class TestAHitTakesItsOwnTilesAttribution:
 
     def test_keeps_the_pairing_when_the_text_drops_an_earlier_record(self, make: Make) -> None:
         s = self.two_tiles(name_1="Zzzzqqq")
-        result = make(Raw(s).fake).search_places(region_of(s["region"]), dataset="d", text="Cafe")
+        result = make(Raw(s).fake).search_nearby(region_of(s["region"]), dataset="d", text="Cafe")
         assert [(h.origin, h.collection) for h in result.places] == [
             ("urn:atgeo:d:c2:2", CollectionKey(dataset="d", collection="c2"))
         ]

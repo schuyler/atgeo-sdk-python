@@ -11,7 +11,16 @@ from typing import Any
 
 import pytest
 
-from atgeo import AsyncAtgeoClient, AtgeoClient, PlaceRecord, SearchResult, ServiceDescription, Tileset
+from atgeo import (
+    AsyncAtgeoClient,
+    AtgeoClient,
+    FallbackSearchResult,
+    KeywordSearchResult,
+    NearbySearchResult,
+    PlaceRecord,
+    ServiceDescription,
+    Tileset,
+)
 
 from .fake_server import FakeServer
 
@@ -42,8 +51,14 @@ class Client:
         result = getattr(self.inner, name)(*args, **kwargs)
         return asyncio.run(result) if self.kind == "async" else result
 
-    def search_places(self, region: Any, **kwargs: Any) -> SearchResult:
-        return self._call("search_places", region, **kwargs)  # type: ignore[no-any-return]
+    def search_nearby(self, region: Any, **kwargs: Any) -> NearbySearchResult:
+        return self._call("search_nearby", region, **kwargs)  # type: ignore[no-any-return]
+
+    def search_by_keyword(self, keyword: Any, **kwargs: Any) -> KeywordSearchResult:
+        return self._call("search_by_keyword", keyword, **kwargs)  # type: ignore[no-any-return]
+
+    def search_nearby_then_by_keyword(self, region: Any, **kwargs: Any) -> FallbackSearchResult:
+        return self._call("search_nearby_then_by_keyword", region, **kwargs)  # type: ignore[no-any-return]
 
     def get_place(self, origin: str) -> PlaceRecord:
         return self._call("get_place", origin)  # type: ignore[no-any-return]

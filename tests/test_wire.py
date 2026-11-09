@@ -14,12 +14,14 @@ from atgeo._cache import ParsedTiles, TileCache, TileEntry, TtlCache
 from atgeo._locations import coordinate, locate
 from atgeo._urls import is_http_url, prepare_url
 from atgeo._wire import (
+    SearchedPlace,
     TileList,
     TileRecord,
     error_from,
     importance_of,
     parse_body,
     read_place,
+    read_search_places,
     read_service_description,
     read_tile_list,
     read_tile_payload,
@@ -86,13 +88,14 @@ class TestPrimitives:
         assert read_tile_list(j('{"tiles": []}')).overview is False
 
 
-# fixtures/lenient-readers.json (contract §13): a body for each of the five readers and what a port's reader
+# fixtures/lenient-readers.json (contract §13): a body for each of the six readers and what a port's reader
 # keeps of it, in JSON terms. The readers return dataclasses, and a field that is None is a missing key.
 LENIENT: list[dict[str, Any]] = fixture("lenient-readers.json")
 READERS: dict[str, Callable[[object], object]] = {
     "getTiles": read_tile_list,
     "tilePayload": read_tile_payload,
     "getPlace": read_place,
+    "searchPlaces": read_search_places,
     "describeService": read_service_description,
     "describeTileset": read_tileset,
 }
@@ -103,10 +106,13 @@ def camel(name: str) -> str:
 
 
 def to_json(v: object) -> object:
-    """What a reader returned, in the fixture's terms: camelCase keys, None as a missing key, lists for tuples."""
+    """What a reader returned, in the fixture's terms: camelCase keys, None as a missing key, lists for tuples.
+    A searchPlaces element's origin is the one exception: None there is the fixture's null."""
     if dataclasses.is_dataclass(v) and not isinstance(v, type):
         return {
-            camel(f.name): to_json(getattr(v, f.name)) for f in dataclasses.fields(v) if getattr(v, f.name) is not None
+            camel(f.name): to_json(getattr(v, f.name))
+            for f in dataclasses.fields(v)
+            if getattr(v, f.name) is not None or (isinstance(v, SearchedPlace) and f.name == "origin")
         }
     if isinstance(v, (list, tuple)):
         return [to_json(x) for x in v]

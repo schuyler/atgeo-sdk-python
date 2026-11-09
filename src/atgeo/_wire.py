@@ -61,6 +61,22 @@ class PlaceBody:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchedPlace:
+    """One element of a searchPlaces answer: the record key (``value.origin`` if a string, else ``uri`` if a
+    string, else None), the value, the importance and the attribution (empty unless an array)."""
+
+    origin: str | None
+    value: dict[str, Any]
+    importance: int | None
+    attribution: tuple[Attribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchPlaces:
+    places: list[SearchedPlace]
+
+
+@dataclass(frozen=True, slots=True)
 class TileList:
     tiles: list[str]
     overview: bool
@@ -193,6 +209,31 @@ def read_place(body: object) -> PlaceBody:
         importance_of(body.get("importance")),
         read_attribution(attribution) if type(attribution) is list else (),
     )
+
+
+def read_search_places(body: object) -> SearchPlaces:
+    """A searchPlaces answer (contract §1): the elements of ``places`` that are objects with an object ``value``,
+    in served order, nothing deduplicated. ``url`` is not read. Raises only when ``places`` is not a list."""
+    places = body.get("places") if type(body) is dict else None
+    if type(places) is not list:
+        raise AtgeoDecodingError("searchPlaces response has no places list")
+    out = []
+    for p in places:
+        if type(p) is not dict:
+            continue
+        value = p.get("value")
+        if type(value) is not dict:
+            continue
+        origin, uri, attribution = value.get("origin"), p.get("uri"), p.get("attribution")
+        out.append(
+            SearchedPlace(
+                origin=origin if type(origin) is str else uri if type(uri) is str else None,
+                value=value,
+                importance=importance_of(p.get("importance")),
+                attribution=read_attribution(attribution) if type(attribution) is list else (),
+            )
+        )
+    return SearchPlaces(out)
 
 
 # The describe types.

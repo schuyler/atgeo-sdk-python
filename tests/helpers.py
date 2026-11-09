@@ -14,7 +14,7 @@ from atgeo import Attribution, Bbox, Circle, CollectionKey, Region
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# The dataset and collection a search names; search_places has no defaults (contract §4.1).
+# The dataset and collection a search names; search_nearby has no defaults (contract §4.1).
 OVERTURE: Final = {"dataset": "overturemaps.org", "collection": "place"}
 
 

@@ -4,23 +4,39 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 from collections.abc import Callable
-from typing import Self, TypeVar
+from typing import Literal, Self, TypeVar
 
 from ._engine import (
     DEFAULT_CACHE_BUDGET_BYTES,
     DEFAULT_SERVER,
     MAX_TILES_IN_FLIGHT,
     Engine,
+    KeywordPlan,
     Outcome,
     TileListRequest,
     returned,
 )
+from ._region import validate_keyword_region
+from ._text import qualifies
 from ._threads import start_daemon
 from ._wire import TileList
-from .transport import AsyncTransport
-from .types import PlaceRecord, Region, SearchResult, ServiceDescription, SortMode, TileFailure, Tileset
+from .transport import AsyncTransport, HttpResponse
+from .types import (
+    Bbox,
+    Disclosure,
+    FallbackSearchResult,
+    KeywordSearchResult,
+    NearbySearchResult,
+    PlaceRecord,
+    Region,
+    ServiceDescription,
+    SortMode,
+    TileFailure,
+    Tileset,
+)
 
 _T = TypeVar("_T")
 
@@ -69,6 +85,61 @@ def _first(group: BaseExceptionGroup[BaseException]) -> BaseException:
     return next((e for e in leaves if isinstance(e, MemoryError)), leaves[0])
 
 
+class KeywordAutocomplete:
+    """What ``AsyncAtgeoClient.autocomplete_by_keyword`` returns: one operation, ``search_by_keyword``.
+
+    Each text field makes its own, so two fields sharing a client do not supersede each other. It holds the
+    previous call's task and nothing else: it caches nothing, and it does not debounce.
+    """
+
+    __slots__ = ("_client", "_collection", "_dataset", "_previous", "_region")
+
+    def __init__(self, client: AsyncAtgeoClient, dataset: str, collection: str | None, region: Bbox | None) -> None:
+        self._client = client
+        self._dataset = dataset
+        self._collection = collection
+        self._region = region
+        self._previous: asyncio.Task[KeywordSearchResult] | None = None
+
+    async def search_by_keyword(self, keyword: str) -> KeywordSearchResult:
+        """Search the keyword, superseding this autocompleter's previous call.
+
+        Every keyword that qualifies (two or more characters in a word, after case, accents and punctuation are
+        removed) goes to the server as typed, prefixes included. The server keeps no log of it (garganorn's
+        privacy design), though a hostile operator could record what it receives. Debouncing reduces how many
+        prefixes go out; it is the app's choice, and this does not debounce. A keyword that cannot qualify
+        makes no request and returns an empty result that disclosed nothing.
+
+        A call that a later call superseded raises ``asyncio.CancelledError`` although its caller was not
+        cancelled (``task.cancelling()`` is 0 there): catch it and ignore the answer. Do not swallow a
+        ``CancelledError`` that arrives while ``task.cancelling()`` is above 0. A caller that cancels its own
+        call cancels the request too, and gets the same error.
+        """
+        previous = self._previous
+        if previous is not None:
+            previous.cancel()  # a call that is already done ignores this
+        self._client._engine.check_keyword(keyword, "search_by_keyword")
+        # The work is a task of its own, which the next call cancels. Awaiting it keeps the caller's
+        # cancellation reaching the request: cancelling a task that awaits another cancels that one too.
+        task = asyncio.get_running_loop().create_task(self._run(keyword))
+        self._previous = task
+        return await task
+
+    async def _run(self, keyword: str) -> KeywordSearchResult:
+        if not qualifies(keyword):
+            return KeywordSearchResult(places=[], attribution=(), disclosed=Disclosure(keyword=False, region=None))
+        try:
+            return await self._client.search_by_keyword(
+                keyword, dataset=self._dataset, collection=self._collection, region=self._region
+            )
+        except Exception as e:
+            if not self._client._engine.is_keyword_required(e):
+                raise
+            # As for a keyword that cannot qualify, except that this one went out.
+            disclosed = Disclosure(keyword=True, region=1.0 if self._region is not None else None)
+            return KeywordSearchResult(places=[], attribution=(), disclosed=disclosed)
+
+
 class AsyncAtgeoClient:
     """An asyncio client for the atgeo gazetteer. Safe to share between tasks; make one per server.
 
@@ -102,7 +173,7 @@ class AsyncAtgeoClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
 
-    async def search_places(
+    async def search_nearby(
         self,
         region: Region,
         *,
@@ -110,17 +181,19 @@ class AsyncAtgeoClient:
         text: str | None = None,
         collection: str | None = None,
         sort: SortMode | str = SortMode.FUSED,
-    ) -> SearchResult:
+    ) -> NearbySearchResult:
         """Search a region; the text, and the precise region, never leave the device (README, Privacy)."""
         engine = self._engine
         plan = engine.plan(region, text, dataset, collection, sort)
         self._check_loop()
+        sent = threading.Event()  # whether the server was asked for anything about the area (§4.11)
 
         lists: list[TileList | None] = [engine.cached_tile_list(r.key) for r in plan.lists]
         missing = [i for i, cached in enumerate(lists) if cached is None]
         if missing:
 
             async def fetch_list(i: int, r: TileListRequest) -> None:
+                sent.set()
                 response = await self._transport.get(r.url)
                 lists[i] = await _in_thread(lambda: engine.store_tile_list(r.key, response))
 
@@ -160,7 +233,7 @@ class AsyncAtgeoClient:
                     i = claimed
                     claimed += 1
                     try:
-                        outcomes[i] = await self._tile(urls[i], stopping)  # anything else fails the search
+                        outcomes[i] = await self._tile(urls[i], stopping, sent)  # anything else fails the search
                     except asyncio.CancelledError as e:
                         if stopping():
                             raise
@@ -187,9 +260,78 @@ class AsyncAtgeoClient:
         done = [outcome for outcome in outcomes if outcome is not None]
         if len(done) != len(urls):  # every worker ran to its end, so this would be a bug in the loop above
             raise RuntimeError(f"{len(urls) - len(done)} of {len(urls)} tiles were never loaded")
-        return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview)))
+        return returned(await _in_thread(lambda: engine.assemble(plan, urls, done, overview, sent.is_set())))
 
-    async def _tile(self, url: str, stopping: Callable[[], bool]) -> Outcome:
+    async def search_by_keyword(
+        self,
+        keyword: str,
+        *,
+        dataset: str,
+        collection: str | None = None,
+        region: Bbox | None = None,
+    ) -> KeywordSearchResult:
+        """Ask the server for places whose names match the keyword. This sends the keyword (README, Privacy); the
+        region, a box only, goes snapped outward to whole degrees."""
+        engine = self._engine
+        plan = engine.plan_keyword(keyword, dataset, collection, region)
+        self._check_loop()
+        return await self._keyword(plan)
+
+    async def _keyword(self, plan: KeywordPlan) -> KeywordSearchResult:
+        engine = self._engine
+        response = await self._get(plan.url)
+        return await _in_thread(lambda: engine.read_keyword(plan, response))
+
+    async def search_nearby_then_by_keyword(
+        self,
+        region: Region,
+        *,
+        dataset: str,
+        keyword: str,
+        keyword_region: Literal["none", "degree"],
+        collection: str | None = None,
+        sort: SortMode | str = SortMode.FUSED,
+    ) -> FallbackSearchResult:
+        """A nearby search with the keyword as its text, and, only if that finds no word match, a keyword request.
+        A failure after the nearby half means the keyword may have reached the server (README, Privacy)."""
+        engine = self._engine
+        engine.check_fallback(dataset, keyword, keyword_region)
+        nearby = await self.search_nearby(region, dataset=dataset, text=keyword, collection=collection, sort=sort)
+        if not engine.fallback_wants_keyword(keyword, nearby):
+            return engine.fallback_result(nearby, None)
+        try:
+            found = await self.search_by_keyword(
+                keyword, dataset=dataset, collection=collection, region=engine.keyword_region(region, keyword_region)
+            )
+        except Exception as e:
+            if not engine.is_keyword_required(e):
+                raise
+            return engine.refused_keyword(nearby, keyword_region)
+        return engine.fallback_result(nearby, found)
+
+    def autocomplete_by_keyword(
+        self,
+        *,
+        dataset: str,
+        collection: str | None = None,
+        region: Bbox | None = None,
+    ) -> KeywordAutocomplete:
+        """An autocompleter for one text field; see :meth:`KeywordAutocomplete.search_by_keyword`, which sends the
+        keywords it is given. The dataset and region are checked here, as ``search_by_keyword`` checks them."""
+        engine = self._engine
+        engine.check_dataset(dataset, "autocomplete_by_keyword")
+        validate_keyword_region(region)
+        return KeywordAutocomplete(self, dataset, collection, region)
+
+    async def _get(self, url: str) -> HttpResponse:
+        """A request from the calling task, unless that task has been cancelled (contract §11). A coroutine runs
+        to its first suspension before a cancellation reaches it, so a transport that ignores cancellation, or
+        only looks at it later, would send the request first. The yield delivers a cancellation that is pending:
+        a task's ``cancelling()`` is no test, since a transport's timeout can leave it raised for good."""
+        await asyncio.sleep(0)
+        return await self._transport.get(url)
+
+    async def _tile(self, url: str, stopping: Callable[[], bool], sent: threading.Event) -> Outcome:
         """A tile, or why it failed. Only the transport call is guarded here; the engine guards the rest."""
         engine = self._engine
         entry = engine.cached_tile(url)  # checked when a worker reaches the URL, as the reference does
@@ -200,7 +342,8 @@ class AsyncAtgeoClient:
             return await _in_thread(lambda: engine.reparse(url, entry))
         request = engine.tile_request(url)
         if isinstance(request, TileFailure):
-            return request
+            return request  # refused: nothing was asked of the server
+        sent.set()
         try:
             response = engine.check_response(await self._transport.get(request))
         except MemoryError:
@@ -220,7 +363,7 @@ class AsyncAtgeoClient:
         cached = await _in_thread(lambda: engine.cached_place(origin))
         if cached is not None:
             return cached
-        response = await self._transport.get(engine.place_url(origin))
+        response = await self._get(engine.place_url(origin))
         return await _in_thread(lambda: engine.read_place(origin, response))
 
     async def describe_service(self) -> ServiceDescription:
@@ -230,13 +373,13 @@ class AsyncAtgeoClient:
         cached = engine.cached_service()
         if cached is not None:
             return cached
-        response = await self._transport.get(engine.service_url())
+        response = await self._get(engine.service_url())
         return await _in_thread(lambda: engine.store_service(response))
 
     async def describe_tileset(self, slug: str) -> Tileset:
         """A tileset's descriptor; not cached."""
         self._check_loop()
-        response = await self._transport.get(self._engine.tileset_url(slug))
+        response = await self._get(self._engine.tileset_url(slug))
         return await _in_thread(lambda: self._engine.read_tileset(response))
 
     def _check_loop(self) -> None:

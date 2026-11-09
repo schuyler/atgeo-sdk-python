@@ -2,13 +2,17 @@
 
 Where this port reads input differently from the TypeScript reference, within the freedoms the [port contract](https://github.com/schuyler/atgeo-sdk-js/blob/main/docs/port-contract.md) grants (§5, §14). A compliant server never sends any of these; they matter only for malformed data.
 
-This port is conformant to atgeo-sdk-js [`754aa09`](https://github.com/schuyler/atgeo-sdk-js/commit/754aa0917d2839b489f0be3be60ac3b7530a52c7), the contract revision of atgeo-sdk-js#49 (match tiers, the overview drop, required `name` and `location`), with the garganorn lexicons at `2009984`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
+This port is conformant to atgeo-sdk-js [`fc56331`](https://github.com/schuyler/atgeo-sdk-js/commit/fc5633103e5ef195c1f9e6e96213e33ce56058ad), the contract pinned to the squash merge of atgeo-sdk-js#63 (`3d68e5e`: `search_nearby` and the keyword methods, `disclosed`, the tier-1 and tier-2 thresholds, `KeywordRequired`, aborted requests), with the garganorn lexicons at [`59d21b1`](https://github.com/schuyler/garganorn/commit/59d21b117f4a01f9f459fc83c2624b53c6cf503a), which add `searchPlaces`. `tests/fixtures/` is vendored from there byte for byte and CI checks it against its `SOURCE` files.
 
 ## Fixtures and the tests the fixtures can't be (contract §13)
 
-- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (19 scenarios, which name the dataset and collection of each search) run as before. A scenario with `"overview": true` has the fake server answer `getTiles` with an overview, so the fuzzy drop runs.
+- `normalize.json`, `jaro-winkler.json` and `ranking-scenarios.json` (22 scenarios, which name the dataset and collection of each search) run as before. A scenario with `"overview": true` has the fake server answer `getTiles` with an overview, so the fuzzy drop runs.
 - `match-tiers.json` (36 cases) runs in `tests/test_ranking.py::TestMatchTiers`, on the normalized query and the case's place, through the same `match_tier` ranking uses.
-- `lenient-readers.json` runs in `tests/test_wire.py::TestLenientReaders`, against the five readers. The readers return dataclasses, which the runner turns into JSON terms (camelCase keys, `None` as a missing key, tuples as lists) and compares strictly, so `True` is not `1`.
+- `match-tiers-lone-surrogates.json` (4 cases) runs in the same class: a Python string can hold a lone surrogate, so this port runs it, as the contract asks of JavaScript, Kotlin and Python.
+- `qualifying-keywords.json` (23 cases) runs in `tests/test_qualifying.py`, against `qualifies`.
+- `keyword-regions.json` (72 cases) runs in `tests/test_keyword.py::TestKeywordRegions`, against both clients and a fake that refuses what the real server refuses (`BboxTooPrecise`, `InvalidBbox`); each `sent` is also checked to be plain integers.
+- `keyword-fallback.json` (7 scenarios) runs in `tests/test_keyword_fallback.py`, against both clients, with a fresh client per scenario and a raw request-capturing server. The origins are compared in order, with `disclosed`, the number of `searchPlaces` requests and their exact parameters.
+- `lenient-readers.json` runs in `tests/test_wire.py::TestLenientReaders`, against the six readers (the `searchPlaces` reader's `origin` is a JSON null where the others drop a `None`). The readers return dataclasses, which the runner turns into JSON terms (camelCase keys, `None` as a missing key, tuples as lists) and compares strictly, so `True` is not `1`.
 - `attribution-scenarios.json` runs in `tests/test_attribution.py`, against both clients, with a fresh client per scenario and a raw server: every `getTiles` answers the scenario's tile URLs in listed order, and a tile with a status and no body gets the default error body.
 - Tile arrival order, which a fixture can't express: the same file reruns every scenario with more than one tile with the lowest URL's response delayed longest, and checks that the server did see the tiles in reverse URL order.
 - Ordinal order above U+FFFF, which no fixture reaches: `TestOrdinalOrderAboveTheBmp` sorts attribution entries and picks a dedupe winner between tiles whose names differ only at U+10000 and U+FF61. Python compares strings by code point, which puts them the other way round, so attribution is sorted with the same UTF-16 key as tile URLs.
@@ -16,7 +20,7 @@ This port is conformant to atgeo-sdk-js [`754aa09`](https://github.com/schuyler/
 
 ## Attribution and hit collections (contract §4.10, §8, §9)
 
-Where the reference copies the attribution it hands out, this port hands out immutable values: `SearchResult.attribution` and `PlaceRecord.attribution` are tuples of frozen `Attribution` entries whose `licenses` is a tuple, and `SearchHit.collection` is a frozen `CollectionKey`. Nothing an app does to them can reach the cache. The entry's `dataset` and `collection` are `str`, not optional, because the reader keeps an entry only when both are strings.
+Where the reference copies the attribution it hands out, this port hands out immutable values: `NearbySearchResult.attribution`, `KeywordSearchResult.attribution` and `PlaceRecord.attribution` are tuples of frozen `Attribution` entries whose `licenses` is a tuple, and `NearbyHit.collection` and `KeywordHit.collection` are frozen `CollectionKey`s. Nothing an app does to them can reach the cache. The entry's `dataset` and `collection` are `str`, not optional, because the reader keeps an entry only when both are strings.
 
 A tile's attribution is read again from its body when a tile is parsed again, as its records are (§10), so a tile's size stays the length of its body.
 
@@ -82,7 +86,7 @@ The prefix test compares UTF-16 code units, as the contract asks, by encoding ea
 
 Punctuation is `unicodedata.category()` starting with `P`, where the reference uses V8's `\p{P}`. Both follow the Unicode version of their runtime (see below for Python's); no fixture case differs on any supported version.
 
-`SearchHit.name`, `.location`, `PlaceRecord.name` and `.location` (contract §8, §9) were already here, computed on access from the place, so they cannot disagree with `distance`.
+`NearbyHit.name`, `.location`, `KeywordHit.name`, `.location`, `PlaceRecord.name` and `.location` (contract §8, §9) were already here, computed on access from the place, so they cannot disagree with `distance`.
 
 ## Final sigma (contract §7)
 
@@ -91,3 +95,30 @@ Punctuation is `unicodedata.category()` starting with `P`, where the reference u
 Python's Unicode tables travel with the interpreter: 14.0 on 3.11, 15.0 on 3.12, 15.1 on 3.13, 16.0 on 3.14. Normalizing every code point up to U+2FFFF and comparing with Node 22 (Unicode 16.0): Python 3.14 differs on none, 3.12 and 3.13 on 112 (characters added in Unicode 16, plus U+1171E, whose category changed from Mn to Mc), and 3.11 on 209 (the same, plus characters added in 15.0). The contract accepts this skew, the 41 fixture cases pass on every supported version, and a place name would have to use a character newer than the interpreter to notice.
 
 The number table, the JSON margins, URL preparation and the NaN ordering are pinned by tests in `test_wire.py`, `test_ranking.py`, `test_distance.py` and `test_robustness.py`.
+
+
+## The keyword methods (contract §16 to §19)
+
+Argument errors follow the contract's table for Python: `TypeError` for a missing or non-string `dataset`, a non-string `keyword` and a region of the wrong type (a `Circle` is one), `ValueError` for a bbox that fails the bbox checks and for a `keyword_region` that isn't `"none"` or `"degree"`, in the order of §3. The reference throws a `TypeError` for the last too; the contract's table gives Python `ValueError` for it, since only a missing or non-string `dataset`, a non-string `keyword` and a wrongly typed region are `TypeError`.
+
+`search_nearby_then_by_keyword` always returns a `FallbackSearchResult`, where the reference returns the nearby result object itself when it skips the keyword request. The two are separate frozen dataclasses here, so the nearby result's fields are copied into a `FallbackSearchResult` (`places` as a new list holding the same hits), and its `disclosed` is the nearby result's own.
+
+The autocompleter exists on the async client only, as the contract allows. Its calls run as `asyncio.Task`s the next call cancels, so a superseded call raises `asyncio.CancelledError` while `task.cancelling()` in its caller is 0. A call that finds the keyword cannot qualify also runs as a task, so it supersedes the previous call as well. The blocking client has no autocompleter, and no cancellation but `KeyboardInterrupt`, which stops the call before its next request.
+
+`search_by_keyword`'s answer is parsed on the client's own threads, as every other response is, so deeply nested JSON cannot overflow the caller's stack.
+
+## Cancellation before a request (contract §11)
+
+In the async client every request made directly from the caller's task (the keyword request, `get_place`, `describe_service`, `describe_tileset`) first yields to the event loop once, which delivers a cancellation that has already been requested, so that a transport that ignores cancellation, or only looks at it later, is never handed the request. The count `task.cancelling()` is not used as the test: a transport's timeout can leave it raised for good on a task that went on. A search's tile and tile-list requests run in tasks of a task group, which the group does not start once the search's own task has been cancelled. A call answered entirely from the cache still awaits its assembly thread, so from an already-cancelled task it raises `CancelledError` rather than completing, which §14 allows. Nothing between the nearby and the keyword half of the fallback catches `CancelledError`, and a test checks both that and that a cancel arriving between the halves sends no keyword.
+
+## The qualifying keyword (contract §17)
+
+Python counts a `str`'s code points with `len`, which is what the predicate asks for. A string holding a high surrogate followed by a low one as two code points (which JSON cannot produce but Python code can) would count as two, where a JavaScript string reads one character, so the keyword is first read as UTF-16 and the pair becomes the character it encodes. A lone surrogate counts as one character. `normalize` itself does not do this; it never needed to, since the comparisons of §7 are on code units.
+
+## Whole-degree integers (contract §16)
+
+The `bbox` of a keyword search is built from `math.floor` and `math.ceil`, which return `int`s for a `float`, so there is no `.0`, and `ceil(-0.5)` is `0`, never `-0`. `int` inputs (`Bbox(-123, 37, -122, 38)`) are valid and go through the same steps.
+
+## Ranking thresholds (contract §7)
+
+A tier-1 hit is kept at any score, a tier-2 hit needs 0.8, and a query with text whose tokens all fold away (`&`) keeps 0.6. The tier is computed for every record when there is text, which is what the threshold needs; the query's tokens are folded once per search.

@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ DEFAULT_SERVER = "https://places.atgeo.org"
 PUBLISHED_AT = "2026-01-01T00:00:00Z"
 MAX_TILES = 50  # the tile budget describeService reports; constant, as garganorn serves it
 BBOX = re.compile(r"^-?\d+\.\d\d,-?\d+\.\d\d,-?\d+\.\d\d,-?\d+\.\d\d$")
+# A number as the server reads one in a searchPlaces bbox: a sign, digits, an optional point and fraction.
+NUMBER = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)$")
 # format: uri, as the lexicon demands it: a scheme, a colon, optional //, then non-space characters not
 # starting with /. "not a uri" fails; urn:atgeo:... and https://... pass.
 URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:(?://)?[^\s/][^\s]*$")
@@ -33,7 +36,22 @@ PARAMS: dict[str, tuple[set[str], set[str]]] = {  # nsid: (required, optional)
     "org.atgeo.getPlace": ({"uri"}, set()),
     "org.atgeo.describeService": (set(), set()),
     "org.atgeo.describeTileset": ({"slug"}, set()),
+    "org.atgeo.searchPlaces": ({"dataset", "q"}, {"collection", "bbox"}),
 }
+# The lexicons' maxLength for a string parameter, which atproto counts in UTF-8 bytes.
+MAX_BYTES = {"dataset": 253, "collection": 64, "q": 256, "bbox": 128, "slug": 64}
+
+
+def name_tokens(s: str) -> list[str]:
+    """The server's name_tokens (search_index.sql): lowercase, accents (all marks) stripped, apostrophes dropped,
+    punctuation runs to spaces, final sigma folded, split on whitespace."""
+    decomposed = unicodedata.normalize("NFD", s.lower())
+    stripped = unicodedata.normalize(
+        "NFC", "".join(c for c in decomposed if not unicodedata.category(c).startswith("M"))
+    )
+    unquoted = stripped.translate({0x27: None, 0x2019: None, 0x2BC: None})
+    spaced = "".join(" " if unicodedata.category(c).startswith("P") else c for c in unquoted)
+    return spaced.replace("\u03c2", "\u03c3").split()
 
 
 @dataclass
@@ -155,8 +173,11 @@ class FakeServer:
                 return _error("InvalidRequest", f"Unknown parameters: {sorted(unknown)}")
             if required - set(params):
                 return _error("InvalidRequest", f"Missing required parameters: {sorted(required - set(params))}")
-            if "bbox" in params and not BBOX.match(params["bbox"]):
-                return _error("InvalidRequest", f"bbox must be two-decimal: {params['bbox']}")
+            too_long = [
+                k for k, v in params.items() if len(v.encode("utf-8", "surrogatepass")) > MAX_BYTES.get(k, 1 << 20)
+            ]
+            if too_long:
+                return _error("InvalidRequest", f"{too_long[0]} is too long")
             if "uri" in params and not URI.match(params["uri"]):
                 return _error("InvalidRequest", "uri must be a valid uri")
             return self._xrpc(nsid, params)
@@ -190,6 +211,8 @@ class FakeServer:
             return self._get_tiles(params)
         if nsid == "org.atgeo.getPlace":
             return self._get_place(params["uri"])
+        if nsid == "org.atgeo.searchPlaces":
+            return self._search_places(params)
         if nsid == "org.atgeo.describeService":
             host = urllib.parse.urlsplit(self.server).hostname
             return _json(
@@ -215,6 +238,26 @@ class FakeServer:
 
     def _get_tiles(self, params: dict[str, str]) -> HttpResponse:
         dataset, collection, bbox = params["dataset"], params.get("collection"), params["bbox"]
+        # The server refuses a coordinate with more than two decimals; the client always sends exactly two, so any
+        # other form is the client's bug, which the fake reports rather than answers (§13).
+        if any(re.search(r"\.\d{3,}$", c) for c in bbox.split(",")):
+            return _error("BboxTooPrecise", "One or more bbox coordinates have more than 2 decimal places")
+        if not BBOX.match(bbox):
+            return _error("InvalidRequest", f"fake: getTiles bbox {bbox} is not the client's two-decimal form")
+        selected = self._select(dataset, collection)
+        if isinstance(selected, HttpResponse):
+            return selected
+        urls = sorted(tile.url for t in selected for tile in t.tiles)
+        tiles = self.tiles_for(bbox) if self.tiles_for else urls
+        if isinstance(tiles, list):
+            return _json({"tiles": tiles})
+        if "error" in tiles:
+            return _error(tiles["error"], tiles["message"])
+        return _json(tiles)
+
+    def _select(self, dataset: str, collection: str | None) -> list[FakeTileset] | HttpResponse:
+        """The tilesets carrying the dataset (and collection), or the error answer; shared by getTiles and
+        searchPlaces."""
         with_dataset = [t for t in self.tilesets if any(c["dataset"] == dataset for c in t.collections)]
         if not with_dataset:
             return _error("DatasetNotFound", f"Dataset {dataset} not found")
@@ -227,32 +270,71 @@ class FakeServer:
         ]
         if not selected:
             return _error("CollectionNotFound", f"Collection {collection} not found")
-        urls = sorted(tile.url for t in selected for tile in t.tiles)
-        tiles = self.tiles_for(bbox) if self.tiles_for else urls
-        if isinstance(tiles, list):
-            return _json({"tiles": tiles})
-        if "error" in tiles:
-            return _error(tiles["error"], tiles["message"])
-        return _json(tiles)
+        return selected
+
+    def _place_view(self, tileset: FakeTileset, record: Mapping[str, Any], origin: str) -> dict[str, Any]:
+        parts = origin.split(":")
+        dataset, collection, rest = (parts[2], parts[3], parts[4:]) if len(parts) >= 4 else ("", "", [])
+        view: dict[str, Any] = {"uri": origin, "url": f"{self.server}/{dataset}/{collection}/{':'.join(rest)}"}
+        if "importance" in record:
+            view["importance"] = record["importance"]
+        view["value"] = record["value"]
+        view["attribution"] = self._attribution_list(tileset)
+        return view
+
+    def _search_places(self, params: dict[str, str]) -> HttpResponse:
+        dataset, collection, q, bbox = params["dataset"], params.get("collection"), params["q"], params.get("bbox")
+        if bbox is not None:
+            parts = bbox.split(",")
+            # The server's order: the precision check, then the bbox rules, then the dataset, then the keyword.
+            if len(parts) == 4 and any(re.search("e", p, re.I) or re.search(r"\.\d", p) for p in parts):
+                return _error("BboxTooPrecise", "bbox coordinate has more than 0 decimal places; snap to 1 degree grid")
+            if len(parts) != 4 or not all(NUMBER.match(p.strip()) for p in parts):
+                return _error("InvalidBbox", "bbox must be four comma-separated numbers")
+            west, south, east, north = (float(p) for p in parts)
+            if not all(abs(x) <= 180 for x in (west, east)) or not all(abs(y) <= 90 for y in (south, north)):
+                return _error("InvalidBbox", "bbox out of range")
+            if south >= north:
+                return _error("InvalidBbox", "bbox requires south < north")
+            if west >= east and not (west > 0 > east and west - east < 360):
+                return _error("InvalidBbox", "bbox requires west < east")
+        selected = self._select(dataset, collection)
+        if isinstance(selected, HttpResponse):
+            return selected
+        # The server's own rule (§13), not the SDK's predicate: the first 12 distinct words, one of them with two
+        # or more characters.
+        words = list(dict.fromkeys(name_tokens(q)))[:12]
+        if not any(len(w) >= 2 for w in words):
+            return _error("KeywordRequired", "q needs a word of two or more characters")
+        prefix = None if collection is None else f"urn:atgeo:{dataset}:{collection}:"
+        matches: dict[str, tuple[FakeTileset, dict[str, Any]]] = {}
+        for tileset in selected:
+            for tile in tileset.tiles:
+                for found in tile.records:
+                    origin = found["value"].get("origin")
+                    if type(origin) is not str or origin in matches or (prefix and not origin.startswith(prefix)):
+                        continue
+                    variants = found["value"].get("variants")
+                    variants = variants if type(variants) is list else []
+                    names = [found["value"].get("name"), *(v.get("name") for v in variants if type(v) is dict)]
+                    if any(
+                        type(n) is str and all(any(t.startswith(w) for t in name_tokens(n)) for w in words)
+                        for n in names
+                    ):
+                        matches[origin] = (tileset, found)
+        ordered = sorted(matches.items(), key=lambda item: (-item[1][1].get("importance", 0), item[0]))
+        return _json({"places": [self._place_view(t, found, origin) for origin, (t, found) in ordered]})
 
     def _get_place(self, origin: str) -> HttpResponse:
         parts = origin.split(":")
-        dataset, collection, rest = (parts[2], parts[3], parts[4:]) if len(parts) >= 4 else ("", "", [])
+        dataset, collection = (parts[2], parts[3]) if len(parts) >= 4 else ("", "")
         for t in self.tilesets:
             if not any(c["dataset"] == dataset and c["collection"] == collection for c in t.collections):
                 continue
             for tile in t.tiles:
                 for r in tile.records:
                     if r["value"].get("origin") == origin:
-                        body: dict[str, Any] = {
-                            "uri": origin,
-                            "url": f"{self.server}/{dataset}/{collection}/{':'.join(rest)}",
-                        }
-                        if "importance" in r:
-                            body["importance"] = r["importance"]
-                        body["value"] = r["value"]
-                        body["attribution"] = self._attribution_list(t)
-                        return _json(body)
+                        return _json(self._place_view(t, r, origin))
         return _error("PlaceNotFound", f"Place {origin} not found")
 
 

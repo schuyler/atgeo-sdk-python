@@ -21,6 +21,7 @@ from atgeo import (
     Bbox,
     Circle,
     CollectionKey,
+    Disclosure,
     PlaceRecord,
     Region,
     SortMode,
@@ -102,7 +103,7 @@ class TestGetPlace:
         fake = self.fake()
         network = make(fake).get_place(self.origin)
         fresh = make(fake)
-        fresh.search_places(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE)
+        fresh.search_nearby(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE)
         before = len(fake.requests)
         assert fresh.get_place(self.origin) == network
         assert len(fake.requests) == before
@@ -110,7 +111,7 @@ class TestGetPlace:
     def test_makes_no_request_for_the_origin_of_a_hit_from_an_earlier_search(self, make: Make) -> None:
         fake = self.fake()
         client = make(fake)
-        places = client.search_places(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE).places
+        places = client.search_nearby(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE).places
         before = len(fake.requests)
         origin = places[0].origin
         assert origin is not None
@@ -123,7 +124,7 @@ class TestGetPlace:
             tilesets=[overture([FakeTile(tile_url("a"), [record(uri_only, 4, "https://example.org/r/u")])])]
         )
         client = make(fake)
-        places = client.search_places(REGION, dataset="overturemaps.org").places
+        places = client.search_nearby(REGION, dataset="overturemaps.org").places
         assert places[0].origin == "https://example.org/r/u"
         fake.go_offline()
         assert client.get_place("https://example.org/r/u") == PlaceRecord(
@@ -167,7 +168,7 @@ class TestGetPlace:
     ) -> None:
         fake = self.with_references()
         client = make(fake)
-        client.search_places(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE)
+        client.search_nearby(Bbox(-122.40, 37.79, -122.39, 37.80), **OVERTURE)
         fake.go_offline()
         answer = client.get_place(self.origin)
         assert isinstance(answer.attribution, tuple)
@@ -186,11 +187,11 @@ class TestGetPlace:
         fake = self.with_references()
         client = make(fake)
         region = Bbox(-122.40, 37.79, -122.39, 37.80)
-        original = client.search_places(region, **OVERTURE).attribution
+        original = client.search_nearby(region, **OVERTURE).attribution
         fake.go_offline()
         answer = client.get_place(self.origin)
         assert_immutable(answer.attribution)
-        assert client.search_places(region, **OVERTURE).attribution == original
+        assert client.search_nearby(region, **OVERTURE).attribution == original
         assert client.get_place(self.origin).attribution == self.served
 
     def test_changing_a_network_answers_attribution_changes_nothing_cached(self, make: Make) -> None:
@@ -290,7 +291,7 @@ class TestDescribeServiceAndDescribeTileset:
         assert e.value.code == "TilesetNotFound"
 
 
-class TestSearchPlacesResults:
+class TestSearchNearbyResults:
     records: ClassVar[list[dict[str, Any]]] = [
         record(
             place("cafe", "Zanzibar Cafe", [point(0.001, 0)], {"futureKey": {"a": 1}, "variants": [{"name": "ZC"}]}), 2
@@ -306,7 +307,7 @@ class TestSearchPlacesResults:
     def test_returns_origin_the_wire_place_importance_meters_distance_and_null_score_without_text(
         self, make: Make
     ) -> None:
-        result = self.client(make).search_places(self.circle, **OVERTURE)
+        result = self.client(make).search_nearby(self.circle, **OVERTURE)
         cafe = next(h for h in result.places if h.origin == place_origin("cafe"))
         assert cafe.place == self.records[0]["value"]
         assert "importance" not in cafe.place
@@ -316,11 +317,11 @@ class TestSearchPlacesResults:
         assert all(h.score is None for h in result.places)
 
     def test_gives_distance_0_to_a_bbox_containing_the_center(self, make: Make) -> None:
-        result = self.client(make).search_places(self.circle, **OVERTURE)
+        result = self.client(make).search_nearby(self.circle, **OVERTURE)
         assert next(h for h in result.places if h.origin == place_origin("division")).distance == 0
 
     def test_returns_a_numeric_score_with_text(self, make: Make) -> None:
-        result = self.client(make).search_places(self.circle, text="Zanzibar Cafe", **OVERTURE)
+        result = self.client(make).search_nearby(self.circle, text="Zanzibar Cafe", **OVERTURE)
         cafe = next(h for h in result.places if h.origin == place_origin("cafe"))
         assert cafe.score is not None
         assert abs(cafe.score - 1) < 0.005
@@ -328,15 +329,16 @@ class TestSearchPlacesResults:
 
     def test_treats_text_that_normalizes_to_empty_as_no_text(self, make: Make) -> None:
         client = self.client(make)
-        none = client.search_places(self.circle, **OVERTURE)
-        blank = client.search_places(self.circle, text="   ", **OVERTURE)
+        none = client.search_nearby(self.circle, **OVERTURE)
+        blank = client.search_nearby(self.circle, text="   ", **OVERTURE)
         assert len(blank.places) > 0
-        assert blank == none
+        # Answered from the cache, so nothing went to the server this time (contract §4.11).
+        assert blank == dataclasses.replace(none, disclosed=Disclosure(keyword=False, region=None))
         assert all(h.score is None for h in blank.places)
 
     def test_reads_name_and_location_from_the_place(self, make: Make) -> None:
         # Contract §14's accessors: computed from the place, so they agree with distance.
-        result = self.client(make).search_places(self.circle, **OVERTURE)
+        result = self.client(make).search_nearby(self.circle, **OVERTURE)
         cafe = next(h for h in result.places if h.origin == place_origin("cafe"))
         assert cafe.name == "Zanzibar Cafe"
         assert cafe.location.point is not None
@@ -351,7 +353,7 @@ class TestOrderingAmongPlacesContainingTheCenter:
     @staticmethod
     def ids(make: Make, values: list[tuple[dict[str, Any], int]], region: Region, **search: Any) -> list[str]:
         fake = FakeServer(tilesets=[overture([FakeTile(tile_url("a"), [record(v, i) for v, i in values])])])
-        places = make(fake).search_places(region, **search, **OVERTURE).places
+        places = make(fake).search_nearby(region, **search, **OVERTURE).places
         return [str(h.origin)[len(place_origin("")) :] for h in places]
 
     def test_puts_the_smaller_box_first_when_the_center_sits_on_the_antimeridian_seam(self, make: Make) -> None:
@@ -408,9 +410,9 @@ class TestDatasetsAndCollections:
 
     def test_keys_the_tile_list_on_dataset_and_collection(self, make: Make) -> None:
         fake, client = self.setup(make)
-        client.search_places(REGION, dataset="openstreetmap.org", collection="way")
-        client.search_places(REGION, dataset="openstreetmap.org")
-        client.search_places(REGION, dataset="overturemaps.org")
+        client.search_nearby(REGION, dataset="openstreetmap.org", collection="way")
+        client.search_nearby(REGION, dataset="openstreetmap.org")
+        client.search_nearby(REGION, dataset="overturemaps.org")
         assert [f"{p['dataset']}|{p.get('collection')}" for p in self.tile_list_requests(fake)] == [
             "openstreetmap.org|way",
             "openstreetmap.org|None",
@@ -427,12 +429,12 @@ class TestDatasetsAndCollections:
                 )
             ]
         )
-        places = make(fake).search_places(REGION, dataset="openstreetmap.org", collection="way").places
+        places = make(fake).search_nearby(REGION, dataset="openstreetmap.org", collection="way").places
         assert [h.origin for h in places] == ["urn:atgeo:openstreetmap.org:way:2"]
 
     def test_searches_a_whole_dataset_when_only_the_dataset_is_named(self, make: Make) -> None:
         fake, client = self.setup(make)
-        places = client.search_places(REGION, dataset="openstreetmap.org").places
+        places = client.search_nearby(REGION, dataset="openstreetmap.org").places
         assert sorted(str(h.origin) for h in places) == [
             "https://example.org/r/u",
             "urn:atgeo:openstreetmap.org:node:1",
@@ -444,25 +446,25 @@ class TestDatasetsAndCollections:
 
     def test_filters_to_one_collection_dropping_records_with_no_origin(self, make: Make) -> None:
         fake, client = self.setup(make)
-        places = client.search_places(REGION, dataset="openstreetmap.org", collection="way").places
+        places = client.search_nearby(REGION, dataset="openstreetmap.org", collection="way").places
         assert [h.origin for h in places] == ["urn:atgeo:openstreetmap.org:way:2"]
         assert query(fake.requests[0])["collection"] == "way"
 
     def test_rejects_a_search_with_no_dataset_before_any_request_with_a_dataset_message(self, make: Make) -> None:
         fake, client = self.setup(make)
         with pytest.raises(TypeError, match="dataset"):
-            client.search_places(REGION)
+            client.search_nearby(REGION)
         assert fake.requests == []
 
     def test_rejects_a_collection_named_without_a_dataset(self, make: Make) -> None:
         fake, client = self.setup(make)
         with pytest.raises(TypeError, match="dataset"):
-            client.search_places(REGION, collection="division")
+            client.search_nearby(REGION, collection="division")
         assert fake.requests == []
 
     def test_requires_dataset_in_the_signature_of_both_clients(self) -> None:
         for cls in (AtgeoClient, AsyncAtgeoClient):
-            parameter = inspect.signature(cls.search_places).parameters["dataset"]
+            parameter = inspect.signature(cls.search_nearby).parameters["dataset"]
             assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
             assert parameter.default is inspect.Parameter.empty
 
@@ -470,11 +472,11 @@ class TestDatasetsAndCollections:
         # mypy reports an unused ignore here if dataset ever becomes optional again.
         client = AtgeoClient(transport=FakeServer().transport)
         with pytest.raises(TypeError, match="dataset"):
-            client.search_places(REGION)  # type: ignore[call-arg]
+            client.search_nearby(REGION)  # type: ignore[call-arg]
 
     def test_raises_for_a_missing_dataset_when_the_async_client_is_called_not_awaited(self) -> None:
         fake = FakeServer()
-        search: Any = AsyncAtgeoClient(transport=fake.async_transport).search_places
+        search: Any = AsyncAtgeoClient(transport=fake.async_transport).search_nearby
         error: TypeError | None = None
         try:
             search(REGION).close()  # a coroutine, if the call did not raise; closed so that none is left unawaited
@@ -495,7 +497,7 @@ class TestDatasetsAndCollections:
         ):
             for dataset in ({}, {"dataset": None}):
                 with pytest.raises(TypeError, match="dataset"):
-                    client.search_places(region, **dataset, **kwargs)
+                    client.search_nearby(region, **dataset, **kwargs)
         assert fake.requests == []
 
     @pytest.mark.parametrize("dataset", [None, 5, 1.5, True, ["overturemaps.org"], b"overturemaps.org", {}])
@@ -506,7 +508,7 @@ class TestDatasetsAndCollections:
         fake, client = self.setup(make)
         extra = {"collection": "place"} if with_collection else {}
         with pytest.raises(TypeError, match="dataset"):
-            client.search_places(REGION, dataset=dataset, **extra)
+            client.search_nearby(REGION, dataset=dataset, **extra)
         assert fake.requests == []
 
     def test_takes_a_str_subclass_for_a_dataset(self, make: Make) -> None:
@@ -514,7 +516,7 @@ class TestDatasetsAndCollections:
             OSM = "openstreetmap.org"
 
         fake, client = self.setup(make)
-        places = client.search_places(REGION, dataset=Dataset.OSM).places
+        places = client.search_nearby(REGION, dataset=Dataset.OSM).places
         assert len(places) == 4
         assert query(fake.requests[0])["dataset"] == "openstreetmap.org"
 
@@ -522,7 +524,7 @@ class TestDatasetsAndCollections:
     def test_sends_an_empty_dataset_to_the_server(self, make: Make) -> None:
         fake, client = self.setup(make)
         with pytest.raises(AtgeoError):
-            client.search_places(REGION, dataset="")
+            client.search_nearby(REGION, dataset="")
         lists = [r for r in fake.requests if "org.atgeo.getTiles" in r]
         assert len(lists) == 1
         assert urllib.parse.parse_qs(urllib.parse.urlsplit(lists[0]).query, keep_blank_values=True)["dataset"] == [""]
@@ -531,7 +533,7 @@ class TestDatasetsAndCollections:
         self, make: Make
     ) -> None:
         _, client = self.setup(make)
-        places = client.search_places(REGION, dataset="openstreetmap.org").places
+        places = client.search_nearby(REGION, dataset="openstreetmap.org").places
         by_origin = {h.origin: h.collection for h in places}
         assert by_origin == {
             "urn:atgeo:openstreetmap.org:node:1": CollectionKey(dataset="openstreetmap.org", collection="node"),
@@ -552,7 +554,7 @@ class TestDatasetsAndCollections:
                 )
             ]
         )
-        places = make(fake).search_places(REGION, dataset="openstreetmap.org").places
+        places = make(fake).search_nearby(REGION, dataset="openstreetmap.org").places
         assert {h.origin: h.collection for h in places} == {
             "urn:atgeo:openstreetmap.org:way:2": collection_key({"dataset": "openstreetmap.org", "collection": "way"}),
             "urn:atgeo:openstreetmap.org:wayside:9": collection_key(
@@ -570,12 +572,12 @@ class TestDatasetsAndCollections:
         inside = osm("way", "1", 37.771)
         mid = osm("way", "2", 37.772) | {"origin": "x:urn:atgeo:openstreetmap.org:way:2"}
         fake = self.osm_tileset(record(inside), record(mid))
-        places = make(fake).search_places(REGION, dataset="openstreetmap.org", collection="way").places
+        places = make(fake).search_nearby(REGION, dataset="openstreetmap.org", collection="way").places
         assert [h.origin for h in places] == ["urn:atgeo:openstreetmap.org:way:1"]
 
     def test_gives_an_origin_that_merely_contains_the_prefix_no_collection(self, make: Make) -> None:
         mid = osm("way", "2", 37.772) | {"origin": "x:urn:atgeo:openstreetmap.org:way:2"}
-        places = make(self.osm_tileset(record(mid))).search_places(REGION, dataset="openstreetmap.org").places
+        places = make(self.osm_tileset(record(mid))).search_nearby(REGION, dataset="openstreetmap.org").places
         assert [(h.origin, h.collection) for h in places] == [("x:urn:atgeo:openstreetmap.org:way:2", None)]
 
     def test_never_reads_a_collection_from_the_uri_fallback(self, make: Make) -> None:
@@ -585,13 +587,13 @@ class TestDatasetsAndCollections:
         uri = "urn:atgeo:openstreetmap.org:way:9"
         fake = self.osm_tileset(record(by_uri, None, uri))
         client = make(fake)
-        places = client.search_places(REGION, dataset="openstreetmap.org").places
+        places = client.search_nearby(REGION, dataset="openstreetmap.org").places
         assert [(h.origin, h.collection) for h in places] == [(uri, None)]
-        assert client.search_places(REGION, dataset="openstreetmap.org", collection="way").places == []
+        assert client.search_nearby(REGION, dataset="openstreetmap.org", collection="way").places == []
 
     def test_gives_a_hit_a_fresh_pair_not_the_attribution_entry(self, make: Make) -> None:
         fake = self.osm_tileset(record(osm("way", "1", 37.771)))
-        (hit,) = make(fake).search_places(REGION, dataset="openstreetmap.org").places
+        (hit,) = make(fake).search_nearby(REGION, dataset="openstreetmap.org").places
         assert hit.collection == CollectionKey(dataset="openstreetmap.org", collection="way")
         assert type(hit.collection) is CollectionKey  # the entry, with its release and licenses, is another type
         assert {f.name for f in dataclasses.fields(hit.collection)} == {"dataset", "collection"}
@@ -622,7 +624,7 @@ class TestDatasetsAndCollections:
                 )
             ]
         )
-        result = make(fake).search_places(REGION, dataset="openstreetmap.org", collection="way")
+        result = make(fake).search_nearby(REGION, dataset="openstreetmap.org", collection="way")
         assert result.attribution == (
             Attribution(dataset="openstreetmap.org", collection="node", source="https://www.openstreetmap.org"),
             Attribution(dataset="openstreetmap.org", collection="relation"),
@@ -631,7 +633,7 @@ class TestDatasetsAndCollections:
 
     def test_gives_an_empty_attribution_tuple_when_no_tile_was_used(self, make: Make) -> None:
         _, client = self.setup(make)
-        result = client.search_places(REGION, dataset="overturemaps.org")  # a tileset with no tiles
+        result = client.search_nearby(REGION, dataset="overturemaps.org")  # a tileset with no tiles
         assert result.tiles.fetched == 0
         assert result.attribution == ()
         assert isinstance(result.attribution, tuple)
@@ -652,7 +654,7 @@ class TestConstruction:
             def __index__(self) -> int:
                 return 1024
 
-        assert make(FakeServer(), cache_budget_bytes=IntLike()).search_places(REGION, **OVERTURE).complete
+        assert make(FakeServer(), cache_budget_bytes=IntLike()).search_nearby(REGION, **OVERTURE).complete
 
     @pytest.mark.parametrize("budget", [None, "52428800", 1.5, True])
     def test_refuses_a_cache_budget_that_is_not_an_int(self, make: Make, budget: object) -> None:
@@ -666,7 +668,7 @@ class TestConstruction:
             make(FakeServer(), cache_budget_bytes=-1)
 
     def test_takes_a_zero_cache_budget(self, make: Make) -> None:
-        result = make(FakeServer(), cache_budget_bytes=0).search_places(REGION, **OVERTURE)
+        result = make(FakeServer(), cache_budget_bytes=0).search_nearby(REGION, **OVERTURE)
         assert result.complete
 
     def test_strips_trailing_slashes_from_the_server(self, make: Make) -> None:
@@ -677,7 +679,7 @@ class TestConstruction:
     def test_takes_arguments_after_the_region_by_keyword_only(self, make: Make) -> None:
         client = make(FakeServer())
         with pytest.raises(TypeError):
-            client.inner.search_places(REGION, "Starbux", **OVERTURE)  # type: ignore[call-arg]
+            client.inner.search_nearby(REGION, "Starbux", **OVERTURE)  # type: ignore[call-arg]
 
 
 SMALL_STACK = """
@@ -753,7 +755,7 @@ class TestClosing:
             await client.aclose()
             await client.aclose()  # closing twice is harmless
             for call in (
-                lambda: client.search_places(REGION, **OVERTURE),
+                lambda: client.search_nearby(REGION, **OVERTURE),
                 lambda: client.get_place("urn:x"),
                 client.describe_service,
                 lambda: client.describe_tileset("s"),
@@ -783,10 +785,10 @@ class TestClosing:
 
             async def main() -> None:
                 client = AsyncAtgeoClient(base)
-                assert (await client.search_places(REGION, **OVERTURE)).complete
+                assert (await client.search_nearby(REGION, **OVERTURE)).complete
                 await client.aclose()
                 with pytest.raises(RuntimeError, match="is closed"):
-                    await client.search_places(REGION, **OVERTURE)
+                    await client.search_nearby(REGION, **OVERTURE)
 
             asyncio.run(main())
             assert sum("getTiles" in r.target for r in server.requests) == 1
@@ -809,7 +811,7 @@ class TestClosing:
             client.inner.close()  # type: ignore[union-attr]
         else:
             asyncio.run(client.inner.aclose())  # type: ignore[union-attr]
-        assert client.search_places(REGION, **OVERTURE).complete
+        assert client.search_nearby(REGION, **OVERTURE).complete
 
 
 class TestEventLoopAffinity:
@@ -828,7 +830,7 @@ class TestEventLoopAffinity:
             with pytest.raises(AtgeoError):
                 asyncio.run(client.describe_tileset("s"))
             for call in (
-                lambda: client.search_places(REGION, **OVERTURE),
+                lambda: client.search_nearby(REGION, **OVERTURE),
                 lambda: client.get_place("urn:x"),
                 client.describe_service,
             ):

@@ -27,7 +27,7 @@ def bboxes_sent(fake: FakeServer) -> list[str]:
 
 def emitted(make: Make, region: Region) -> list[str]:
     fake = FakeServer()
-    make(fake).search_places(region, **OVERTURE)
+    make(fake).search_nearby(region, **OVERTURE)
     return bboxes_sent(fake)
 
 
@@ -63,7 +63,7 @@ class TestBboxFieldNames:
 
     def test_names_the_fields_in_the_invalid_bbox_message(self, make: Make) -> None:
         with pytest.raises(ValueError, match="south > north"):
-            make(FakeServer()).search_places(Bbox(west=0, south=10, east=1, north=5), **OVERTURE)
+            make(FakeServer()).search_nearby(Bbox(west=0, south=10, east=1, north=5), **OVERTURE)
 
 
 class TestWorkedExamples:
@@ -273,7 +273,7 @@ class TestAntimeridian:
             ],
             tiles_for=lambda bbox: [west] if bbox.startswith("170") else [east],
         )
-        result = make(fake).search_places(Bbox(170, 10, -170, 20), **OVERTURE)
+        result = make(fake).search_nearby(Bbox(170, 10, -170, 20), **OVERTURE)
         assert sorted(str(h.origin) for h in result.places) == [place_origin("e"), place_origin("w")]
         assert result.complete is True
 
@@ -305,33 +305,33 @@ class TestInvalidRegions:
     def test_raises_value_error_before_any_request(self, make: Make, region: Region) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="invalid"):
-            make(fake).search_places(region, **OVERTURE)
+            make(fake).search_nearby(region, **OVERTURE)
         assert fake.requests == []
 
     def test_accepts_west_greater_than_east(self, make: Make) -> None:
-        assert make(FakeServer()).search_places(Bbox(170, 0, -170, 1), **OVERTURE) is not None
+        assert make(FakeServer()).search_nearby(Bbox(170, 0, -170, 1), **OVERTURE) is not None
 
     def test_raises_value_error_before_any_request_for_similarity_sort_without_text(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="similarity"):
-            make(fake).search_places(Bbox(0, 0, 1, 1), sort="similarity", **OVERTURE)
+            make(fake).search_nearby(Bbox(0, 0, 1, 1), sort="similarity", **OVERTURE)
         assert fake.requests == []
 
     # Python-specific: the argument checks the reference's types make unnecessary.
     def test_raises_value_error_before_any_request_for_an_unknown_sort(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(ValueError, match="unknown sort"):
-            make(fake).search_places(Bbox(0, 0, 1, 1), sort="nearest", **OVERTURE)
+            make(fake).search_nearby(Bbox(0, 0, 1, 1), sort="nearest", **OVERTURE)
         assert fake.requests == []
 
     def test_raises_type_error_before_any_request_for_a_region_of_the_wrong_type(self, make: Make) -> None:
         fake = FakeServer()
         with pytest.raises(TypeError, match="Circle or a Bbox"):
-            make(fake).search_places((0, 0, 1, 1), **OVERTURE)
+            make(fake).search_nearby((0, 0, 1, 1), **OVERTURE)
         assert fake.requests == []
 
     def test_checks_the_region_before_the_sort(self, make: Make) -> None:
         with pytest.raises(ValueError, match="invalid"):
-            make(FakeServer()).search_places(Circle(math.nan, 0, 1), sort="nearest", **OVERTURE)
+            make(FakeServer()).search_nearby(Circle(math.nan, 0, 1), sort="nearest", **OVERTURE)
         with pytest.raises(ValueError, match="unknown sort"):
-            make(FakeServer()).search_places(Circle(0, 0, 1), sort="nearest", text=None, **OVERTURE)
+            make(FakeServer()).search_nearby(Circle(0, 0, 1), sort="nearest", text=None, **OVERTURE)
