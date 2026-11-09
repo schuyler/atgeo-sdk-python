@@ -126,7 +126,7 @@ class TestAutocomplete:
             transport.release_first = True
             second = await typing.search_by_keyword("Zan")
             with pytest.raises(asyncio.CancelledError):
-                await first
+                await asyncio.wait_for(first, timeout=5)
             assert first.cancelled()
             return second, bool(this.cancelling())
 
@@ -156,7 +156,7 @@ class TestAutocomplete:
             await asyncio.sleep(0.01)
             transport.release_first = True
             await typing.search_by_keyword("Zan")
-            await waiting
+            await asyncio.wait_for(waiting, timeout=5)
             return seen
 
         assert run(main) == [0]
@@ -172,7 +172,7 @@ class TestAutocomplete:
             await client.autocomplete_by_keyword(**OV).search_by_keyword("Zan")
             assert transport.release is not None
             transport.release.set()
-            return await first
+            return await asyncio.wait_for(first, timeout=5)
 
         assert run(main).disclosed.keyword
 
@@ -196,10 +196,43 @@ class TestAutocomplete:
             await asyncio.sleep(0.01)
             skipped = await typing.search_by_keyword("Z")
             with pytest.raises(asyncio.CancelledError):
-                await first
+                await asyncio.wait_for(first, timeout=5)
             return skipped
 
         assert run(main) == NOTHING
+        assert transport.cancelled == 1
+
+    def test_a_keyword_that_cannot_qualify_resolves_empty_for_an_already_cancelled_caller_and_still_supersedes(
+        self,
+    ) -> None:
+        # No request is made, so there is nothing for the cancellation to stop (contract §19 step 3, §11).
+        fake = FakeServer(tilesets=[overture(TILES)])
+        transport = Hanging(fake)
+        client = AsyncAtgeoClient(transport=transport)
+
+        async def main() -> KeywordSearchResult:
+            typing = client.autocomplete_by_keyword(**OV)
+            first = asyncio.ensure_future(typing.search_by_keyword("Za"))
+            await asyncio.sleep(0.01)
+            assert len(transport.started) == 1
+
+            skipped: list[KeywordSearchResult] = []
+
+            async def cancelled_caller() -> None:
+                current = asyncio.current_task()
+                assert current is not None
+                current.cancel()  # pending: delivered at the task's next suspension
+                skipped.append(await typing.search_by_keyword("Z"))  # resolves without suspending
+
+            caller = asyncio.ensure_future(cancelled_caller())
+            with pytest.raises(asyncio.CancelledError):  # the cancellation lands once the call has returned
+                await asyncio.wait_for(caller, timeout=5)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(first, timeout=5)
+            return skipped[0]
+
+        assert run(main) == NOTHING
+        assert len(transport.started) == 1  # no request for the keyword that cannot qualify
         assert transport.cancelled == 1
 
 
@@ -253,7 +286,7 @@ class TestAutocompleteArguments:
             with pytest.raises(TypeError):
                 await typing.search_by_keyword(5)  # type: ignore[arg-type]
             with pytest.raises(asyncio.CancelledError):
-                await first
+                await asyncio.wait_for(first, timeout=5)
 
         run(main)
 
@@ -313,7 +346,7 @@ class TestCallersOwnCancellation:
             assert len(transport.started) == 1
             call.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await call
+                await asyncio.wait_for(call, timeout=5)
             return call.cancelled()
 
         assert run(main)
@@ -333,7 +366,7 @@ class TestCallersOwnCancellation:
             assert first.done()  # superseded: already ended with the cancellation outcome
             first.cancel()  # a later abort by the caller is a no-op
             with pytest.raises(asyncio.CancelledError):
-                await first
+                await asyncio.wait_for(first, timeout=5)
 
         run(main)
         assert transport.cancelled == 1
@@ -358,6 +391,6 @@ class TestCallersOwnCancellation:
             await asyncio.sleep(0.01)
             transport.release_first = True
             await typing.search_by_keyword("Zan")
-            return await waiting
+            return await asyncio.wait_for(waiting, timeout=5)
 
         assert run(main) == 0

@@ -106,7 +106,7 @@ class KeywordAutocomplete:
 
         Every keyword that qualifies (two or more characters in a word, after case, accents and punctuation are
         removed) goes to the server as typed, prefixes included. The server keeps no log of it (garganorn's
-        privacy design), though a hostile operator could record what it receives. Debouncing reduces how many
+        privacy design); a hostile operator can record what it receives. Debouncing reduces how many
         prefixes go out; it is the app's choice, and this does not debounce. A keyword that cannot qualify
         makes no request and returns an empty result that disclosed nothing.
 
@@ -119,6 +119,9 @@ class KeywordAutocomplete:
         if previous is not None:
             previous.cancel()  # a call that is already done ignores this
         self._client._engine.check_keyword(keyword, "search_by_keyword")
+        if not qualifies(keyword):
+            # No request is made, so there is nothing for a cancelled caller to stop (contract §19, §11).
+            return KeywordSearchResult(places=[], attribution=(), disclosed=Disclosure(keyword=False, region=None))
         # The work is a task of its own, which the next call cancels. Awaiting it keeps the caller's
         # cancellation reaching the request: cancelling a task that awaits another cancels that one too.
         task = asyncio.get_running_loop().create_task(self._run(keyword))
@@ -126,8 +129,6 @@ class KeywordAutocomplete:
         return await task
 
     async def _run(self, keyword: str) -> KeywordSearchResult:
-        if not qualifies(keyword):
-            return KeywordSearchResult(places=[], attribution=(), disclosed=Disclosure(keyword=False, region=None))
         try:
             return await self._client.search_by_keyword(
                 keyword, dataset=self._dataset, collection=self._collection, region=self._region
